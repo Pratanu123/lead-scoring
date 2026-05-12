@@ -23,6 +23,16 @@ Go API
             |
             +--> future cache, rate limit, idempotency
 
+Scale-out path:
+
+Client / CRM
+    -> Load Balancer
+        -> API Instance 1
+        -> API Instance 2
+        -> API Instance N
+            -> Shared Postgres
+            -> Shared Redis
+
 Local developer UIs:
 
 Browser -> Adminer          -> Postgres
@@ -42,6 +52,7 @@ Lead Created -> Embedding Job -> pgvector -> Similar Lead Retrieval -> LLM Scori
 - Redis UI: Redis Commander for local key inspection.
 - Lead service: validates and normalizes lead data.
 - Lead repository: owns SQL persistence.
+- Read API path: lists and fetches leads with bounded pagination.
 - Embedding service: planned Day 10+ component that converts lead text into vectors.
 - Scoring service: planned component that retrieves similar leads and asks an LLM for probability + reasoning.
 
@@ -58,6 +69,8 @@ GET  /healthz
 POST /create-lead
 POST /v1/create-lead
 POST /v1/leads
+GET  /v1/leads
+GET  /v1/leads/{id}
 ```
 
 Planned APIs:
@@ -106,3 +119,6 @@ LIMIT 5;
 - pgvector avoids an extra vector database while the project is small to mid-scale.
 - Redis is reserved for idempotency keys, short-lived scoring cache, and rate limiting.
 - Embeddings and scoring should move to async workers once lead creation latency matters.
+- Day 2 keeps the API stateless, so horizontal scaling is just more API instances behind a load balancer.
+- `GET /v1/leads` enforces bounded `limit` and `offset` values to avoid unbounded scans.
+- The same service/repository layers now back both write and read paths, which keeps controller logic thin as the surface area grows.

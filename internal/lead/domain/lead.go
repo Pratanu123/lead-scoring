@@ -29,3 +29,8 @@ type CreateLeadInput struct {
 	AnnualRevenue float64 `json:"annual_revenue"`
 	Notes         string  `json:"notes"`
 }
+
+type ListLeadsInput struct {
+	Limit  int
+	Offset int
+}
