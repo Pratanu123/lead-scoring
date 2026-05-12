@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"regexp"
 	"strings"
 
 	"lead-scoring/internal/lead/domain"
@@ -10,6 +12,9 @@ import (
 )
 
 var ErrInvalidLead = errors.New("invalid lead")
+var ErrLeadNotFound = errors.New("lead not found")
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type LeadService struct {
 	repo repository.Repository
@@ -41,4 +46,36 @@ func (s *LeadService) CreateLead(ctx context.Context, input domain.CreateLeadInp
 	}
 
 	return s.repo.Create(ctx, normalized)
+}
+
+func (s *LeadService) ListLeads(ctx context.Context, input domain.ListLeadsInput) ([]domain.Lead, error) {
+	if input.Limit <= 0 {
+		input.Limit = 20
+	}
+	if input.Limit > 100 {
+		input.Limit = 100
+	}
+	if input.Offset < 0 {
+		input.Offset = 0
+	}
+
+	return s.repo.List(ctx, input)
+}
+
+func (s *LeadService) GetLead(ctx context.Context, id string) (domain.Lead, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || !uuidPattern.MatchString(id) {
+		return domain.Lead{}, ErrLeadNotFound
+	}
+
+	lead, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Lead{}, ErrLeadNotFound
+		}
+
+		return domain.Lead{}, err
+	}
+
+	return lead, nil
 }

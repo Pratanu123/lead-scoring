@@ -35,7 +35,7 @@ build:
 	$(COMPOSE) build api
 
 restart:
-	$(COMPOSE) up --build -d api
+	$(COMPOSE) up --build --force-recreate -d api
 
 down:
 	$(COMPOSE) down

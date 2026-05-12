@@ -15,6 +15,7 @@ import (
 	leadcontroller "lead-scoring/internal/lead/controller"
 	leadrepository "lead-scoring/internal/lead/repository"
 	leadservice "lead-scoring/internal/lead/service"
+	opensearch "lead-scoring/internal/platform/opensearch"
 	"lead-scoring/internal/platform/postgres"
 	redisclient "lead-scoring/internal/platform/redis"
 )
@@ -42,12 +43,17 @@ func main() {
 
 	leadRepo := leadrepository.NewPostgresRepository(db)
 	leadSvc := leadservice.NewLeadService(leadRepo)
-	leadHandler := leadcontroller.NewLeadHandler(leadSvc)
+
+	// Initialize OpenSearch client for direct log shipping
+	opensearchClient := opensearch.NewClient(cfg.OpenSearchURL, cfg.OpenSearchUser, cfg.OpenSearchPassword)
+
+	leadHandler := leadcontroller.NewLeadHandler(leadSvc, logger, opensearchClient)
 
 	router := httpapi.NewRouter(httpapi.RouterDeps{
 		LeadHandler: leadHandler,
 		DB:          db,
 		Redis:       redisClient,
+		Logger:      logger,
 	})
 
 	server := &http.Server{

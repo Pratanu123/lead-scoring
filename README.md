@@ -11,6 +11,13 @@ Production-grade AI lead scoring backend with CRM-style ingestion, retrieval-aug
 - Working `POST /create-lead` endpoint.
 - Health endpoint that checks Postgres and Redis.
 
+## Day 2 Scope
+
+- Scalability basics applied to a stateless Go API.
+- Load-balancer-friendly lead API shape.
+- Service-backed `GET /v1/leads` and `GET /v1/leads/{id}` endpoints.
+- Read-path notes for pagination and horizontal scaling.
+
 ## Local Setup
 
 Install Go on macOS only if you want to run Go commands outside Docker:
@@ -80,6 +87,18 @@ curl -X POST http://localhost:8080/create-lead \
   }'
 ```
 
+List leads:
+
+```bash
+curl "http://localhost:8080/v1/leads?limit=10&offset=0"
+```
+
+Get one lead:
+
+```bash
+curl http://localhost:8080/v1/leads/<lead-id>
+```
+
 Reset local database volumes:
 
 ```bash
@@ -89,6 +108,26 @@ make reset
 ## Architecture Docs
 
 See [docs/architecture.md](docs/architecture.md).
+
+## Day 2 Schedule
+
+`7:00-7:30`
+Scalability basics for stateless APIs, connection pools, and pagination limits.
+
+`7:30-8:00`
+Design a load-balanced lead API with multiple app instances behind a reverse proxy.
+
+`8:00-8:45`
+Implement repository and service read methods.
+
+`8:45-9:15`
+Add controllers and routes for list/detail lead APIs.
+
+`9:15-9:40`
+Commit with `feat: add lead read APIs`.
+
+`9:40-10:00`
+Update README and architecture notes with the Day 2 API surface.
 
 ## Day 1 Commit Message
 
