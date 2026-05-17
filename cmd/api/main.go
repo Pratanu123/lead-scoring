@@ -42,12 +42,14 @@ func main() {
 	defer redisClient.Close()
 
 	leadRepo := leadrepository.NewPostgresRepository(db)
-	leadSvc := leadservice.NewLeadService(leadRepo)
+	leadSvc := leadservice.NewLeadService(leadRepo, redisClient)
 
-	// Initialize OpenSearch client for direct log shipping
-	opensearchClient := opensearch.NewClient(cfg.OpenSearchURL, cfg.OpenSearchUser, cfg.OpenSearchPassword)
+	var opensearchClient *opensearch.Client
+	if cfg.OpenSearchEnabled {
+		opensearchClient = opensearch.NewClient(cfg.OpenSearchURL, cfg.OpenSearchUser, cfg.OpenSearchPassword)
+	}
 
-	leadHandler := leadcontroller.NewLeadHandler(leadSvc, logger, opensearchClient)
+	leadHandler := leadcontroller.NewLeadHandler(leadSvc, logger, opensearchClient, redisClient)
 
 	router := httpapi.NewRouter(httpapi.RouterDeps{
 		LeadHandler: leadHandler,

@@ -149,10 +149,21 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 
 	// Lead endpoints with metrics
+	mux.HandleFunc("/create-lead", metricsMiddleware(deps.LeadHandler.CreateLead))
+	mux.HandleFunc("/v1/create-lead", metricsMiddleware(deps.LeadHandler.CreateLead))
+	mux.HandleFunc("/v1/create-leads", metricsMiddleware(deps.LeadHandler.CreateLead))
+	mux.HandleFunc("/v1/get-leads", metricsMiddleware(deps.LeadHandler.ListLeads))
+	mux.HandleFunc("/v1/get-leads/{id}", metricsMiddleware(deps.LeadHandler.GetLead))
+
+	// Backward-compatible REST-style aliases.
 	mux.HandleFunc("POST /v1/leads", metricsMiddleware(deps.LeadHandler.CreateLead))
-	mux.HandleFunc("GET /v1/get-leads", metricsMiddleware(deps.LeadHandler.ListLeads))
-	mux.HandleFunc("GET /v1/get-leads/{id}", metricsMiddleware(deps.LeadHandler.GetLead))
-	mux.HandleFunc("POST /v1/create-lead", metricsMiddleware(deps.LeadHandler.CreateLead))
+	mux.HandleFunc("GET /v1/leads", metricsMiddleware(deps.LeadHandler.ListLeads))
+	mux.HandleFunc("GET /v1/leads/{id}", metricsMiddleware(deps.LeadHandler.GetLead))
+
+	// RAG and scoring endpoints.
+	mux.HandleFunc("/v1/leads/{id}/embeddings", metricsMiddleware(deps.LeadHandler.UpsertLeadEmbedding))
+	mux.HandleFunc("/v1/leads/{id}/similar", metricsMiddleware(deps.LeadHandler.SimilarLeads))
+	mux.HandleFunc("/v1/leads/{id}/score", metricsMiddleware(deps.LeadHandler.ScoreLead))
 
 	return mux
 }

@@ -107,7 +107,7 @@ services:
       opensearch:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q 'kbn_name'"]
+      test: ["CMD-SHELL", "curl -s -f -u admin:SecureLeadScore_2024! http://localhost:5601/api/status | grep -q '\"state\":\"green\"'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -124,7 +124,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
     healthcheck:
-      test: ["CMD-SHELL", "curl -s -f http://localhost:9090/-/healthy | grep -q 'success'"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep -q 'Healthy'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -150,7 +150,7 @@ services:
       retries: 5
 
   vector:
-    image: timberio/vector:latest
+    image: timberio/vector:latest-debian
     container_name: lead-scoring-vector
     volumes:
       - ./vector.toml:/etc/vector/vector.toml:ro
@@ -161,7 +161,7 @@ services:
       opensearch:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-s", "-f", "http://localhost:8686/health"]
+      test: ["CMD", "vector", "validate", "/etc/vector/vector.toml"]
       interval: 10s
       timeout: 5s
       retries: 5
