@@ -1,0 +1,43 @@
+[api]
+enabled = true
+address = "0.0.0.0:8686"
+
+[sources.docker_logs]
+type = "docker_logs"
+include_containers = ["lead-scoring-api"]
+
+[transforms.parse_api_json]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+raw_message = to_string(.message) ?? ""
+parsed = parse_json(raw_message) ?? {}
+. = {
+  "@timestamp": parsed.time,
+  "time": parsed.time,
+  "service": "lead-scoring-api",
+  "container_name": .container_name,
+  "message": raw_message,
+  "level": parsed.level,
+  "msg": parsed.msg,
+  "method": parsed.method,
+  "path": parsed.path,
+  "lead_id": parsed.lead_id,
+  "company_name": parsed.company_name,
+  "count": parsed.count,
+  "limit": parsed.limit,
+  "offset": parsed.offset
+}
+'''
+
+[sinks.opensearch_logs]
+type = "elasticsearch"
+inputs = ["parse_api_json"]
+endpoints = ["https://opensearch:9200"]
+api_version = "v8"
+mode = "bulk"
+bulk.index = "logs-%Y.%m.%d"
+auth.strategy = "basic"
+auth.user = "admin"
+auth.password = "SecureLeadScore_2024!"
+tls.verify_certificate = false

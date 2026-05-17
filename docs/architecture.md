@@ -21,7 +21,12 @@ Go API
     |
     +--> Redis
             |
-            +--> future cache, rate limit, idempotency
+            +--> cache, idempotency
+
+Observability:
+
+Go API JSON logs -> Vector -> OpenSearch -> OpenSearch Dashboards
+Go API /metrics -> Prometheus -> Grafana
 
 Scale-out path:
 
@@ -38,9 +43,9 @@ Local developer UIs:
 Browser -> Adminer          -> Postgres
 Browser -> Redis Commander  -> Redis
 
-Future RAG flow:
+RAG flow:
 
-Lead Created -> Embedding Job -> pgvector -> Similar Lead Retrieval -> LLM Scoring -> lead_scores
+Lead Created -> Local Embedding -> pgvector -> Similar Lead Retrieval -> RAG Scoring -> lead_scores
 ```
 
 ## Low-Level Design
@@ -53,8 +58,8 @@ Lead Created -> Embedding Job -> pgvector -> Similar Lead Retrieval -> LLM Scori
 - Lead service: validates and normalizes lead data.
 - Lead repository: owns SQL persistence.
 - Read API path: lists and fetches leads with bounded pagination.
-- Embedding service: planned Day 10+ component that converts lead text into vectors.
-- Scoring service: planned component that retrieves similar leads and asks an LLM for probability + reasoning.
+- Embedding path: converts lead text into deterministic local embeddings and stores them in pgvector.
+- Scoring path: retrieves similar leads and writes conversion probability + reasoning into `lead_scores`.
 
 ### Database Schema
 
@@ -68,16 +73,20 @@ Lead Created -> Embedding Job -> pgvector -> Similar Lead Retrieval -> LLM Scori
 GET  /healthz
 POST /create-lead
 POST /v1/create-lead
+POST /v1/create-leads
 POST /v1/leads
 GET  /v1/leads
 GET  /v1/leads/{id}
+GET  /v1/get-leads
+GET  /v1/get-leads/{id}
+POST /v1/leads/{id}/embeddings
+GET  /v1/leads/{id}/similar
+POST /v1/leads/{id}/score
 ```
 
 Planned APIs:
 
 ```text
-POST /v1/leads/{id}/score
-GET  /v1/leads/{id}/similar
 GET  /v1/leads/{id}/scores
 ```
 
@@ -122,3 +131,6 @@ LIMIT 5;
 - Day 2 keeps the API stateless, so horizontal scaling is just more API instances behind a load balancer.
 - `GET /v1/leads` enforces bounded `limit` and `offset` values to avoid unbounded scans.
 - The same service/repository layers now back both write and read paths, which keeps controller logic thin as the surface area grows.
+- Day 3 caches lead reads in Redis with short TTLs and invalidates list caches after writes.
+- Day 4 uses `Idempotency-Key` for safe create retries and SHA-256 content hashes for embedding updates.
+- Day 5 keeps RAG in Postgres with pgvector before introducing heavier vector infrastructure.

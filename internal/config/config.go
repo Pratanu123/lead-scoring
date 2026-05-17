@@ -11,6 +11,7 @@ type Config struct {
 	RedisAddr          string
 	RedisPassword      string
 	RedisDB            int
+	OpenSearchEnabled  bool
 	OpenSearchURL      string
 	OpenSearchUser     string
 	OpenSearchPassword string
@@ -23,6 +24,7 @@ func Load() Config {
 		RedisAddr:          getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:      getEnv("REDIS_PASSWORD", ""),
 		RedisDB:            getEnvInt("REDIS_DB", 0),
+		OpenSearchEnabled:  getEnvBool("OPENSEARCH_DIRECT_LOGS", false),
 		OpenSearchURL:      getEnv("OPENSEARCH_URL", "https://opensearch:9200"),
 		OpenSearchUser:     getEnv("OPENSEARCH_USER", "admin"),
 		OpenSearchPassword: getEnv("OPENSEARCH_PASSWORD", "SecureLeadScore_2024!"),
@@ -44,6 +46,20 @@ func getEnvInt(key string, fallback int) int {
 	}
 
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fallback
 	}

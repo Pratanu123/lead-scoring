@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -12,16 +15,19 @@ import (
 	"lead-scoring/internal/lead/domain"
 	"lead-scoring/internal/lead/service"
 	opensearch "lead-scoring/internal/platform/opensearch"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type LeadHandler struct {
 	service  *service.LeadService
 	logger   *slog.Logger
 	osClient *opensearch.Client
+	cache    *redis.Client
 }
 
-func NewLeadHandler(service *service.LeadService, logger *slog.Logger, osClient *opensearch.Client) *LeadHandler {
-	return &LeadHandler{service: service, logger: logger, osClient: osClient}
+func NewLeadHandler(service *service.LeadService, logger *slog.Logger, osClient *opensearch.Client, cache *redis.Client) *LeadHandler {
+	return &LeadHandler{service: service, logger: logger, osClient: osClient, cache: cache}
 }
 
 func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +40,14 @@ func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer r.Body.Close()
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if cached, ok := h.getIdempotentResponse(r.Context(), idempotencyKey); ok {
+		w.Header().Set("X-Idempotent-Replay", "true")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(cached)
+		return
+	}
 
 	var input domain.CreateLeadInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -69,6 +83,7 @@ func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
 			h.logger.Warn("opensearch index failed", "error", err)
 		}
 	}
+	h.setIdempotentResponse(r.Context(), idempotencyKey, lead)
 	writeJSON(w, http.StatusCreated, lead)
 }
 
@@ -173,6 +188,87 @@ func (h *LeadHandler) GetLead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, lead)
 }
 
+func (h *LeadHandler) UpsertLeadEmbedding(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("UpsertLeadEmbedding request", "method", r.Method, "path", r.URL.Path)
+
+	if r.Method != http.MethodPost {
+		h.logger.Warn("invalid method for UpsertLeadEmbedding", "method", r.Method)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	result, err := h.service.UpsertLeadEmbedding(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, service.ErrLeadNotFound) {
+			writeError(w, http.StatusNotFound, "lead not found")
+			return
+		}
+
+		h.logger.Error("failed to upsert embedding", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to upsert lead embedding")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *LeadHandler) SimilarLeads(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("SimilarLeads request", "method", r.Method, "path", r.URL.Path)
+
+	if r.Method != http.MethodGet {
+		h.logger.Warn("invalid method for SimilarLeads", "method", r.Method)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	limit, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	if err != nil && r.URL.Query().Get("limit") != "" {
+		writeError(w, http.StatusBadRequest, "limit must be a valid integer")
+		return
+	}
+
+	similarLeads, err := h.service.SimilarLeads(r.Context(), r.PathValue("id"), limit)
+	if err != nil {
+		if errors.Is(err, service.ErrLeadNotFound) {
+			writeError(w, http.StatusNotFound, "lead not found")
+			return
+		}
+
+		h.logger.Error("failed to find similar leads", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to find similar leads")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": similarLeads,
+		"limit": normalizedSimilarLimit(limit),
+	})
+}
+
+func (h *LeadHandler) ScoreLead(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("ScoreLead request", "method", r.Method, "path", r.URL.Path)
+
+	if r.Method != http.MethodPost {
+		h.logger.Warn("invalid method for ScoreLead", "method", r.Method)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	result, err := h.service.ScoreLead(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, service.ErrLeadNotFound) {
+			writeError(w, http.StatusNotFound, "lead not found")
+			return
+		}
+
+		h.logger.Error("failed to score lead", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to score lead")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, result)
+}
+
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -198,4 +294,45 @@ func normalizedOffset(offset int) int {
 		return 0
 	}
 	return offset
+}
+
+func normalizedSimilarLimit(limit int) int {
+	if limit <= 0 {
+		return 5
+	}
+	if limit > 20 {
+		return 20
+	}
+	return limit
+}
+
+func (h *LeadHandler) getIdempotentResponse(ctx context.Context, key string) ([]byte, bool) {
+	if h.cache == nil || key == "" {
+		return nil, false
+	}
+
+	value, err := h.cache.Get(ctx, idempotencyCacheKey(key)).Bytes()
+	if err != nil {
+		return nil, false
+	}
+
+	return value, true
+}
+
+func (h *LeadHandler) setIdempotentResponse(ctx context.Context, key string, lead domain.Lead) {
+	if h.cache == nil || key == "" {
+		return
+	}
+
+	payload, err := json.Marshal(lead)
+	if err != nil {
+		return
+	}
+
+	_ = h.cache.Set(ctx, idempotencyCacheKey(key), payload, 24*time.Hour).Err()
+}
+
+func idempotencyCacheKey(key string) string {
+	hash := sha256.Sum256([]byte(key))
+	return "lead-scoring:idempotency:create-lead:" + hex.EncodeToString(hash[:])
 }

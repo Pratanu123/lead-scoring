@@ -11,6 +11,9 @@ type Repository interface {
 	Create(ctx context.Context, input domain.CreateLeadInput) (domain.Lead, error)
 	List(ctx context.Context, input domain.ListLeadsInput) ([]domain.Lead, error)
 	GetByID(ctx context.Context, id string) (domain.Lead, error)
+	UpsertEmbedding(ctx context.Context, leadID string, model string, contentHash string, vector string) (domain.EmbeddingResult, error)
+	FindSimilar(ctx context.Context, leadID string, vector string, limit int) ([]domain.SimilarLead, error)
+	CreateScore(ctx context.Context, leadID string, probability float64, reasoning string, model string) (domain.LeadScore, error)
 }
 
 type PostgresRepository struct {
@@ -184,6 +187,115 @@ WHERE id = $1;
 	}
 
 	return lead, nil
+}
+
+func (r *PostgresRepository) UpsertEmbedding(ctx context.Context, leadID string, model string, contentHash string, vector string) (domain.EmbeddingResult, error) {
+	const query = `
+INSERT INTO lead_embeddings (
+    lead_id,
+    embedding_model,
+    content_hash,
+    embedding
+) VALUES ($1, $2, $3, $4::vector)
+ON CONFLICT (lead_id, embedding_model)
+DO UPDATE SET
+    content_hash = EXCLUDED.content_hash,
+    embedding = EXCLUDED.embedding,
+    created_at = now()
+RETURNING lead_id, embedding_model, content_hash, created_at;
+`
+
+	var result domain.EmbeddingResult
+	err := r.db.QueryRowContext(ctx, query, leadID, model, contentHash, vector).Scan(
+		&result.LeadID,
+		&result.Model,
+		&result.ContentHash,
+		&result.CreatedAt,
+	)
+	if err != nil {
+		return domain.EmbeddingResult{}, err
+	}
+
+	return result, nil
+}
+
+func (r *PostgresRepository) FindSimilar(ctx context.Context, leadID string, vector string, limit int) ([]domain.SimilarLead, error) {
+	const query = `
+SELECT
+    l.id,
+    l.company_name,
+    l.email,
+    l.source,
+    COALESCE(l.industry, ''),
+    1 - (e.embedding <=> $2::vector) AS similarity
+FROM lead_embeddings e
+JOIN leads l ON l.id = e.lead_id
+WHERE e.lead_id <> $1
+ORDER BY e.embedding <=> $2::vector
+LIMIT $3;
+`
+
+	rows, err := r.db.QueryContext(ctx, query, leadID, vector, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	similarLeads := make([]domain.SimilarLead, 0, limit)
+	for rows.Next() {
+		var lead domain.SimilarLead
+		if err := rows.Scan(
+			&lead.ID,
+			&lead.CompanyName,
+			&lead.Email,
+			&lead.Source,
+			&lead.Industry,
+			&lead.Similarity,
+		); err != nil {
+			return nil, err
+		}
+
+		similarLeads = append(similarLeads, lead)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return similarLeads, nil
+}
+
+func (r *PostgresRepository) CreateScore(ctx context.Context, leadID string, probability float64, reasoning string, model string) (domain.LeadScore, error) {
+	const query = `
+INSERT INTO lead_scores (
+    lead_id,
+    conversion_probability,
+    reasoning,
+    model
+) VALUES ($1, $2, $3, $4)
+RETURNING
+    id,
+    lead_id,
+    conversion_probability::float8,
+    reasoning,
+    model,
+    created_at;
+`
+
+	var score domain.LeadScore
+	err := r.db.QueryRowContext(ctx, query, leadID, probability, reasoning, model).Scan(
+		&score.ID,
+		&score.LeadID,
+		&score.ConversionProbability,
+		&score.Reasoning,
+		&score.Model,
+		&score.CreatedAt,
+	)
+	if err != nil {
+		return domain.LeadScore{}, err
+	}
+
+	return score, nil
 }
 
 func nullableString(value string) sql.NullString {

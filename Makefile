@@ -3,7 +3,7 @@ GO_IMAGE := golang:1.23-alpine
 APP_DIR := /app
 .DEFAULT_GOAL := help
 
-.PHONY: help dev up build restart down reset logs ps test tidy fmt shell db redis db-ui redis-ui health lead
+.PHONY: help dev up build restart down reset logs ps test tidy fmt shell db redis db-ui redis-ui health lead leads score
 
 help:
 	@echo "lead-scoring shortcuts"
@@ -24,6 +24,8 @@ help:
 	@echo "  make redis     Open redis-cli in Redis container"
 	@echo "  make health    Check API health"
 	@echo "  make lead      Create a sample lead"
+	@echo "  make leads     List cached leads"
+	@echo "  make score     Score LEAD_ID=<id> with RAG"
 
 dev:
 	$(COMPOSE) up --build -d
@@ -77,4 +79,11 @@ health:
 	$(COMPOSE) exec api wget -qO- http://localhost:8080/healthz
 
 lead:
-	$(COMPOSE) exec api wget -qO- --header 'Content-Type: application/json' --post-data '{"company_name":"Shortcut Test Co","email":"buyer@shortcut.example","source":"make"}' http://localhost:8080/create-lead
+	$(COMPOSE) exec api wget -qO- --header 'Content-Type: application/json' --header 'Idempotency-Key: make-shortcut-lead' --post-data '{"company_name":"Shortcut Test Co","email":"buyer@shortcut.example","source":"make"}' http://localhost:8080/v1/create-leads
+
+leads:
+	$(COMPOSE) exec api wget -qO- 'http://localhost:8080/v1/get-leads?limit=10&offset=0'
+
+score:
+	@test -n "$(LEAD_ID)" || (echo "usage: make score LEAD_ID=<lead-id>" && exit 1)
+	$(COMPOSE) exec api wget -qO- --post-data '' http://localhost:8080/v1/leads/$(LEAD_ID)/score
