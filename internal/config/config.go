@@ -15,6 +15,9 @@ type Config struct {
 	OpenSearchURL      string
 	OpenSearchUser     string
 	OpenSearchPassword string
+	LLMAPIURL          string
+	LLMAPIKey          string
+	LLMModel           string
 }
 
 func Load() Config {
@@ -28,6 +31,9 @@ func Load() Config {
 		OpenSearchURL:      getEnv("OPENSEARCH_URL", "https://opensearch:9200"),
 		OpenSearchUser:     getEnv("OPENSEARCH_USER", "admin"),
 		OpenSearchPassword: getEnv("OPENSEARCH_PASSWORD", "SecureLeadScore_2024!"),
+		LLMAPIURL:          getEnv("LLM_API_URL", ""),
+		LLMAPIKey:          getEnv("LLM_API_KEY", ""),
+		LLMModel:           getEnv("LLM_MODEL", ""),
 	}
 }
 

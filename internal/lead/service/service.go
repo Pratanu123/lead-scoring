@@ -11,18 +11,19 @@ import (
 	"hash/fnv"
 	"math"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
 	"lead-scoring/internal/lead/domain"
 	"lead-scoring/internal/lead/repository"
+	"lead-scoring/internal/lead/scoring"
 
 	"github.com/redis/go-redis/v9"
 )
 
 var ErrInvalidLead = errors.New("invalid lead")
 var ErrLeadNotFound = errors.New("lead not found")
+var ErrScoreNotFound = errors.New("lead score not found")
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -30,16 +31,19 @@ const (
 	cacheTTL            = 60 * time.Second
 	embeddingDimensions = 1536
 	localEmbeddingModel = "local-hash-embedding-v1"
-	localScoringModel   = "local-rag-scorer-v1"
 )
 
 type LeadService struct {
-	repo  repository.Repository
-	cache *redis.Client
+	repo   repository.Repository
+	cache  *redis.Client
+	scorer scoring.Scorer
 }
 
-func NewLeadService(repo repository.Repository, cache *redis.Client) *LeadService {
-	return &LeadService{repo: repo, cache: cache}
+func NewLeadService(repo repository.Repository, cache *redis.Client, scorer scoring.Scorer) *LeadService {
+	if scorer == nil {
+		scorer = scoring.NewLocalScorer()
+	}
+	return &LeadService{repo: repo, cache: cache, scorer: scorer}
 }
 
 func (s *LeadService) CreateLead(ctx context.Context, input domain.CreateLeadInput) (domain.Lead, error) {
@@ -170,9 +174,12 @@ func (s *LeadService) ScoreLead(ctx context.Context, id string) (domain.ScoreLea
 		return domain.ScoreLeadResult{}, err
 	}
 
-	probability := conversionProbability(lead, similarLeads)
-	reasoning := scoreReasoning(lead, similarLeads, probability)
-	score, err := s.repo.CreateScore(ctx, lead.ID, probability, reasoning, localScoringModel)
+	decision, err := s.scorer.Score(ctx, lead, similarLeads)
+	if err != nil {
+		return domain.ScoreLeadResult{}, err
+	}
+
+	score, err := s.repo.CreateScore(ctx, lead.ID, decision.ConversionProbability, decision.Reasoning, decision.Model)
 	if err != nil {
 		return domain.ScoreLeadResult{}, err
 	}
@@ -181,6 +188,39 @@ func (s *LeadService) ScoreLead(ctx context.Context, id string) (domain.ScoreLea
 		Score:        score,
 		SimilarLeads: similarLeads,
 	}, nil
+}
+
+func (s *LeadService) LatestLeadScore(ctx context.Context, id string) (domain.LeadScore, error) {
+	lead, err := s.GetLead(ctx, id)
+	if err != nil {
+		return domain.LeadScore{}, err
+	}
+
+	score, err := s.repo.GetLatestScore(ctx, lead.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.LeadScore{}, ErrScoreNotFound
+		}
+		return domain.LeadScore{}, err
+	}
+
+	return score, nil
+}
+
+func (s *LeadService) ListLeadScores(ctx context.Context, id string, limit int) ([]domain.LeadScore, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	lead, err := s.GetLead(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.repo.ListScores(ctx, lead.ID, limit)
 }
 
 func leadCacheKey(id string) string {
@@ -314,77 +354,4 @@ func deterministicVector(content string) string {
 	}
 
 	return "[" + strings.Join(values, ",") + "]"
-}
-
-func conversionProbability(lead domain.Lead, similarLeads []domain.SimilarLead) float64 {
-	score := 0.25
-
-	switch strings.ToLower(lead.Source) {
-	case "referral":
-		score += 0.20
-	case "webinar":
-		score += 0.15
-	case "inbound", "website":
-		score += 0.12
-	case "manual":
-		score += 0.05
-	}
-
-	if lead.CompanySize >= 1000 {
-		score += 0.14
-	} else if lead.CompanySize >= 250 {
-		score += 0.10
-	} else if lead.CompanySize >= 50 {
-		score += 0.06
-	}
-
-	if lead.AnnualRevenue >= 10000000 {
-		score += 0.12
-	} else if lead.AnnualRevenue >= 1000000 {
-		score += 0.07
-	}
-
-	if strings.TrimSpace(lead.Notes) != "" {
-		score += 0.05
-	}
-
-	if len(similarLeads) > 0 {
-		similarities := make([]float64, 0, len(similarLeads))
-		for _, similar := range similarLeads {
-			similarities = append(similarities, similar.Similarity)
-		}
-		sort.Sort(sort.Reverse(sort.Float64Slice(similarities)))
-		score += math.Max(0, similarities[0]) * 0.18
-	}
-
-	if score > 0.95 {
-		return 0.95
-	}
-	if score < 0.05 {
-		return 0.05
-	}
-	return math.Round(score*10000) / 10000
-}
-
-func scoreReasoning(lead domain.Lead, similarLeads []domain.SimilarLead, probability float64) string {
-	reasons := []string{
-		fmt.Sprintf("Lead %s has a %.1f%% estimated conversion probability.", lead.CompanyName, probability*100),
-	}
-
-	if strings.TrimSpace(lead.Source) != "" {
-		reasons = append(reasons, fmt.Sprintf("Source signal is %q.", lead.Source))
-	}
-	if lead.CompanySize > 0 {
-		reasons = append(reasons, fmt.Sprintf("Company size signal is %d employees.", lead.CompanySize))
-	}
-	if lead.AnnualRevenue > 0 {
-		reasons = append(reasons, fmt.Sprintf("Revenue signal is %.0f.", lead.AnnualRevenue))
-	}
-	if len(similarLeads) > 0 {
-		reasons = append(reasons, fmt.Sprintf("RAG found %d similar lead(s); closest match is %s with %.2f similarity.", len(similarLeads), similarLeads[0].CompanyName, similarLeads[0].Similarity))
-	} else {
-		reasons = append(reasons, "RAG found no embedded historical leads yet, so the score relies on lead attributes.")
-	}
-
-	return strings.Join(reasons, " ")
 }
