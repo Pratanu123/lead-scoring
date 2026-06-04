@@ -1,0 +1,317 @@
+{
+  "info": {
+    "_postman_id": "c8eae895-fcdb-42b9-b6cb-6dc1299a2bf9",
+    "name": "lead-scoring - Day 4 and Day 5",
+    "description": "Tests atomic idempotency, lead retrieval, pgvector RAG, and scoring history.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "leadId",
+      "value": ""
+    },
+    {
+      "key": "idempotencyKey",
+      "value": ""
+    },
+    {
+      "key": "leadEmail",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "API Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/healthz"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('API is healthy', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().postgres).to.eql('ok');",
+                  "  pm.expect(pm.response.json().redis).to.eql('ok');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Day 4 - Idempotency",
+      "item": [
+        {
+          "name": "Create Lead",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const suffix = Date.now().toString();",
+                  "pm.collectionVariables.set('idempotencyKey', 'postman-day4-' + suffix);",
+                  "pm.collectionVariables.set('leadEmail', 'postman-' + suffix + '@example.com');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Lead created', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('leadId', body.id);",
+                  "pm.test('Lead ID captured', function () {",
+                  "  pm.expect(body.id).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company_name\": \"Postman RAG Logistics\",\n  \"contact_name\": \"Day Four Tester\",\n  \"email\": \"{{leadEmail}}\",\n  \"phone\": \"+91-9999999999\",\n  \"source\": \"referral\",\n  \"industry\": \"logistics\",\n  \"company_size\": 1200,\n  \"annual_revenue\": 25000000,\n  \"notes\": \"Evaluating CRM automation and AI lead prioritization\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/create-leads"
+          }
+        },
+        {
+          "name": "Replay Same Create Request",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Original response replayed', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.headers.get('X-Idempotent-Replay')).to.eql('true');",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('leadId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company_name\": \"Postman RAG Logistics\",\n  \"contact_name\": \"Day Four Tester\",\n  \"email\": \"{{leadEmail}}\",\n  \"phone\": \"+91-9999999999\",\n  \"source\": \"referral\",\n  \"industry\": \"logistics\",\n  \"company_size\": 1200,\n  \"annual_revenue\": 25000000,\n  \"notes\": \"Evaluating CRM automation and AI lead prioritization\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/create-leads"
+          }
+        },
+        {
+          "name": "Reject Reused Key With Different Payload",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Conflicting payload rejected', function () {",
+                  "  pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company_name\": \"Different Company\",\n  \"email\": \"different-{{leadEmail}}\",\n  \"source\": \"website\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/create-leads"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Day 5 - RAG and Scoring",
+      "item": [
+        {
+          "name": "Refresh Lead Embedding",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Embedding stored', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().lead_id).to.eql(pm.collectionVariables.get('leadId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/v1/leads/{{leadId}}/embeddings"
+          }
+        },
+        {
+          "name": "Retrieve Similar Leads",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Similar lead response returned', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/v1/leads/{{leadId}}/similar?limit=5"
+          }
+        },
+        {
+          "name": "Score Lead With RAG",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('RAG score persisted', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const score = pm.response.json().score;",
+                  "  pm.expect(score.conversion_probability).to.be.within(0, 1);",
+                  "  pm.expect(score.reasoning).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/v1/leads/{{leadId}}/score"
+          }
+        },
+        {
+          "name": "Get Latest Lead Score",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Latest score returned', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().lead_id).to.eql(pm.collectionVariables.get('leadId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/v1/leads/{{leadId}}/score"
+          }
+        },
+        {
+          "name": "List Lead Score History",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Score history returned', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().items).to.be.an('array').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/v1/leads/{{leadId}}/scores?limit=20"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Lead Reads",
+      "item": [
+        {
+          "name": "List Leads",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/v1/get-leads?limit=10&offset=0"
+          }
+        },
+        {
+          "name": "Get Lead",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/v1/get-leads/{{leadId}}"
+          }
+        },
+        {
+          "name": "Prometheus Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/metrics"
+          }
+        }
+      ]
+    }
+  ]
+}

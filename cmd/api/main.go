@@ -14,7 +14,9 @@ import (
 	httpapi "lead-scoring/internal/http"
 	leadcontroller "lead-scoring/internal/lead/controller"
 	leadrepository "lead-scoring/internal/lead/repository"
+	leadscoring "lead-scoring/internal/lead/scoring"
 	leadservice "lead-scoring/internal/lead/service"
+	"lead-scoring/internal/platform/idempotency"
 	opensearch "lead-scoring/internal/platform/opensearch"
 	"lead-scoring/internal/platform/postgres"
 	redisclient "lead-scoring/internal/platform/redis"
@@ -42,14 +44,20 @@ func main() {
 	defer redisClient.Close()
 
 	leadRepo := leadrepository.NewPostgresRepository(db)
-	leadSvc := leadservice.NewLeadService(leadRepo, redisClient)
+	var leadScorer leadscoring.Scorer = leadscoring.NewLocalScorer()
+	if cfg.LLMAPIURL != "" && cfg.LLMModel != "" {
+		leadScorer = leadscoring.NewRemoteScorer(cfg.LLMAPIURL, cfg.LLMAPIKey, cfg.LLMModel)
+		logger.Info("remote llm scorer enabled", "model", cfg.LLMModel)
+	}
+	leadSvc := leadservice.NewLeadService(leadRepo, redisClient, leadScorer)
 
 	var opensearchClient *opensearch.Client
 	if cfg.OpenSearchEnabled {
 		opensearchClient = opensearch.NewClient(cfg.OpenSearchURL, cfg.OpenSearchUser, cfg.OpenSearchPassword)
 	}
 
-	leadHandler := leadcontroller.NewLeadHandler(leadSvc, logger, opensearchClient, redisClient)
+	idempotencyStore := idempotency.NewStore(redisClient)
+	leadHandler := leadcontroller.NewLeadHandler(leadSvc, logger, opensearchClient, idempotencyStore)
 
 	router := httpapi.NewRouter(httpapi.RouterDeps{
 		LeadHandler: leadHandler,

@@ -14,6 +14,8 @@ type Repository interface {
 	UpsertEmbedding(ctx context.Context, leadID string, model string, contentHash string, vector string) (domain.EmbeddingResult, error)
 	FindSimilar(ctx context.Context, leadID string, vector string, limit int) ([]domain.SimilarLead, error)
 	CreateScore(ctx context.Context, leadID string, probability float64, reasoning string, model string) (domain.LeadScore, error)
+	GetLatestScore(ctx context.Context, leadID string) (domain.LeadScore, error)
+	ListScores(ctx context.Context, leadID string, limit int) ([]domain.LeadScore, error)
 }
 
 type PostgresRepository struct {
@@ -296,6 +298,82 @@ RETURNING
 	}
 
 	return score, nil
+}
+
+func (r *PostgresRepository) GetLatestScore(ctx context.Context, leadID string) (domain.LeadScore, error) {
+	const query = `
+SELECT
+    id,
+    lead_id,
+    conversion_probability::float8,
+    reasoning,
+    model,
+    created_at
+FROM lead_scores
+WHERE lead_id = $1
+ORDER BY created_at DESC
+LIMIT 1;
+`
+
+	var score domain.LeadScore
+	err := r.db.QueryRowContext(ctx, query, leadID).Scan(
+		&score.ID,
+		&score.LeadID,
+		&score.ConversionProbability,
+		&score.Reasoning,
+		&score.Model,
+		&score.CreatedAt,
+	)
+	if err != nil {
+		return domain.LeadScore{}, err
+	}
+
+	return score, nil
+}
+
+func (r *PostgresRepository) ListScores(ctx context.Context, leadID string, limit int) ([]domain.LeadScore, error) {
+	const query = `
+SELECT
+    id,
+    lead_id,
+    conversion_probability::float8,
+    reasoning,
+    model,
+    created_at
+FROM lead_scores
+WHERE lead_id = $1
+ORDER BY created_at DESC
+LIMIT $2;
+`
+
+	rows, err := r.db.QueryContext(ctx, query, leadID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	scores := make([]domain.LeadScore, 0, limit)
+	for rows.Next() {
+		var score domain.LeadScore
+		if err := rows.Scan(
+			&score.ID,
+			&score.LeadID,
+			&score.ConversionProbability,
+			&score.Reasoning,
+			&score.Model,
+			&score.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		scores = append(scores, score)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return scores, nil
 }
 
 func nullableString(value string) sql.NullString {
