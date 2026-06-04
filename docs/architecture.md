@@ -45,7 +45,7 @@ Browser -> Redis Commander  -> Redis
 
 RAG flow:
 
-Lead Created -> Local Embedding -> pgvector -> Similar Lead Retrieval -> RAG Scoring -> lead_scores
+Lead Created -> Local Embedding -> pgvector -> Similar Lead Retrieval -> Local/Remote LLM Scorer -> lead_scores
 ```
 
 ## Low-Level Design
@@ -59,7 +59,8 @@ Lead Created -> Local Embedding -> pgvector -> Similar Lead Retrieval -> RAG Sco
 - Lead repository: owns SQL persistence.
 - Read API path: lists and fetches leads with bounded pagination.
 - Embedding path: converts lead text into deterministic local embeddings and stores them in pgvector.
-- Scoring path: retrieves similar leads and writes conversion probability + reasoning into `lead_scores`.
+- Scoring path: retrieves similar leads, invokes the configured local or OpenAI-compatible scorer, and writes conversion probability + reasoning into `lead_scores`.
+- Idempotency path: uses an atomic Redis Lua script to bind a key to one request payload, protect concurrent creates, and replay the stored response.
 
 ### Database Schema
 
@@ -82,11 +83,7 @@ GET  /v1/get-leads/{id}
 POST /v1/leads/{id}/embeddings
 GET  /v1/leads/{id}/similar
 POST /v1/leads/{id}/score
-```
-
-Planned APIs:
-
-```text
+GET  /v1/leads/{id}/score
 GET  /v1/leads/{id}/scores
 ```
 
@@ -132,5 +129,5 @@ LIMIT 5;
 - `GET /v1/leads` enforces bounded `limit` and `offset` values to avoid unbounded scans.
 - The same service/repository layers now back both write and read paths, which keeps controller logic thin as the surface area grows.
 - Day 3 caches lead reads in Redis with short TTLs and invalidates list caches after writes.
-- Day 4 uses `Idempotency-Key` for safe create retries and SHA-256 content hashes for embedding updates.
-- Day 5 keeps RAG in Postgres with pgvector before introducing heavier vector infrastructure.
+- Day 4 uses atomic Redis operations for safe create retries, detects conflicting payloads, and uses SHA-256 content hashes for embedding updates.
+- Day 5 keeps RAG in Postgres with pgvector before introducing heavier vector infrastructure, while preserving score history for evaluation.

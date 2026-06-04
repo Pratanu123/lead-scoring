@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,20 +13,19 @@ import (
 
 	"lead-scoring/internal/lead/domain"
 	"lead-scoring/internal/lead/service"
+	"lead-scoring/internal/platform/idempotency"
 	opensearch "lead-scoring/internal/platform/opensearch"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type LeadHandler struct {
 	service  *service.LeadService
 	logger   *slog.Logger
 	osClient *opensearch.Client
-	cache    *redis.Client
+	requests *idempotency.Store
 }
 
-func NewLeadHandler(service *service.LeadService, logger *slog.Logger, osClient *opensearch.Client, cache *redis.Client) *LeadHandler {
-	return &LeadHandler{service: service, logger: logger, osClient: osClient, cache: cache}
+func NewLeadHandler(service *service.LeadService, logger *slog.Logger, osClient *opensearch.Client, requests *idempotency.Store) *LeadHandler {
+	return &LeadHandler{service: service, logger: logger, osClient: osClient, requests: requests}
 }
 
 func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
@@ -41,11 +39,8 @@ func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if cached, ok := h.getIdempotentResponse(r.Context(), idempotencyKey); ok {
-		w.Header().Set("X-Idempotent-Replay", "true")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write(cached)
+	if len(idempotencyKey) > 128 {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key must not exceed 128 characters")
 		return
 	}
 
@@ -56,8 +51,39 @@ func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestHash, err := hashRequest(input)
+	if err != nil {
+		h.logger.Error("failed to hash create lead request", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to process request")
+		return
+	}
+
+	idempotencyResult, err := h.requests.Begin(r.Context(), idempotencyKey, requestHash)
+	if err != nil {
+		h.logger.Error("idempotency store unavailable", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "idempotency service unavailable")
+		return
+	}
+
+	switch idempotencyResult.Status {
+	case idempotency.StatusReplay:
+		w.Header().Set("X-Idempotent-Replay", "true")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(idempotencyResult.Response)
+		return
+	case idempotency.StatusConflict:
+		writeError(w, http.StatusConflict, "Idempotency-Key was already used with a different request body")
+		return
+	case idempotency.StatusInProgress:
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusConflict, "request with this Idempotency-Key is already in progress")
+		return
+	}
+
 	lead, err := h.service.CreateLead(r.Context(), input)
 	if err != nil {
+		h.requests.Abort(r.Context(), idempotencyKey, idempotencyResult.Token)
 		if errors.Is(err, service.ErrInvalidLead) {
 			h.logger.Warn("invalid lead data", "company_name", input.CompanyName, "email", input.Email)
 			writeError(w, http.StatusBadRequest, "company_name, valid email, and source are required")
@@ -83,7 +109,13 @@ func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
 			h.logger.Warn("opensearch index failed", "error", err)
 		}
 	}
-	h.setIdempotentResponse(r.Context(), idempotencyKey, lead)
+
+	response, err := json.Marshal(lead)
+	if err == nil {
+		if err := h.requests.Complete(r.Context(), idempotencyKey, idempotencyResult.Token, response); err != nil {
+			h.logger.Error("failed to store idempotent response", "error", err, "lead_id", lead.ID)
+		}
+	}
 	writeJSON(w, http.StatusCreated, lead)
 }
 
@@ -269,6 +301,65 @@ func (h *LeadHandler) ScoreLead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 
+func (h *LeadHandler) GetLatestLeadScore(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("GetLatestLeadScore request", "method", r.Method, "path", r.URL.Path)
+
+	if r.Method != http.MethodGet {
+		h.logger.Warn("invalid method for GetLatestLeadScore", "method", r.Method)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	score, err := h.service.LatestLeadScore(r.Context(), r.PathValue("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrLeadNotFound):
+			writeError(w, http.StatusNotFound, "lead not found")
+		case errors.Is(err, service.ErrScoreNotFound):
+			writeError(w, http.StatusNotFound, "lead has not been scored yet")
+		default:
+			h.logger.Error("failed to get latest lead score", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to get latest lead score")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, score)
+}
+
+func (h *LeadHandler) ListLeadScores(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("ListLeadScores request", "method", r.Method, "path", r.URL.Path)
+
+	if r.Method != http.MethodGet {
+		h.logger.Warn("invalid method for ListLeadScores", "method", r.Method)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	limit, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	if err != nil && r.URL.Query().Get("limit") != "" {
+		writeError(w, http.StatusBadRequest, "limit must be a valid integer")
+		return
+	}
+
+	scores, err := h.service.ListLeadScores(r.Context(), r.PathValue("id"), limit)
+	if err != nil {
+		if errors.Is(err, service.ErrLeadNotFound) {
+			writeError(w, http.StatusNotFound, "lead not found")
+			return
+		}
+
+		h.logger.Error("failed to list lead scores", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list lead scores")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": scores,
+		"limit": normalizedScoreLimit(limit),
+	})
+}
+
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -306,33 +397,22 @@ func normalizedSimilarLimit(limit int) int {
 	return limit
 }
 
-func (h *LeadHandler) getIdempotentResponse(ctx context.Context, key string) ([]byte, bool) {
-	if h.cache == nil || key == "" {
-		return nil, false
+func normalizedScoreLimit(limit int) int {
+	if limit <= 0 {
+		return 20
 	}
-
-	value, err := h.cache.Get(ctx, idempotencyCacheKey(key)).Bytes()
-	if err != nil {
-		return nil, false
+	if limit > 100 {
+		return 100
 	}
-
-	return value, true
+	return limit
 }
 
-func (h *LeadHandler) setIdempotentResponse(ctx context.Context, key string, lead domain.Lead) {
-	if h.cache == nil || key == "" {
-		return
-	}
-
-	payload, err := json.Marshal(lead)
+func hashRequest(input domain.CreateLeadInput) (string, error) {
+	payload, err := json.Marshal(input)
 	if err != nil {
-		return
+		return "", err
 	}
 
-	_ = h.cache.Set(ctx, idempotencyCacheKey(key), payload, 24*time.Hour).Err()
-}
-
-func idempotencyCacheKey(key string) string {
-	hash := sha256.Sum256([]byte(key))
-	return "lead-scoring:idempotency:create-lead:" + hex.EncodeToString(hash[:])
+	hash := sha256.Sum256(payload)
+	return hex.EncodeToString(hash[:]), nil
 }

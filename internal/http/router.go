@@ -161,9 +161,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	mux.HandleFunc("GET /v1/leads/{id}", metricsMiddleware(deps.LeadHandler.GetLead))
 
 	// RAG and scoring endpoints.
-	mux.HandleFunc("/v1/leads/{id}/embeddings", metricsMiddleware(deps.LeadHandler.UpsertLeadEmbedding))
-	mux.HandleFunc("/v1/leads/{id}/similar", metricsMiddleware(deps.LeadHandler.SimilarLeads))
-	mux.HandleFunc("/v1/leads/{id}/score", metricsMiddleware(deps.LeadHandler.ScoreLead))
+	mux.HandleFunc("POST /v1/leads/{id}/embeddings", metricsMiddleware(deps.LeadHandler.UpsertLeadEmbedding))
+	mux.HandleFunc("GET /v1/leads/{id}/similar", metricsMiddleware(deps.LeadHandler.SimilarLeads))
+	mux.HandleFunc("POST /v1/leads/{id}/score", metricsMiddleware(deps.LeadHandler.ScoreLead))
+	mux.HandleFunc("GET /v1/leads/{id}/score", metricsMiddleware(deps.LeadHandler.GetLatestLeadScore))
+	mux.HandleFunc("GET /v1/leads/{id}/scores", metricsMiddleware(deps.LeadHandler.ListLeadScores))
 
 	return mux
 }

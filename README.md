@@ -136,6 +136,43 @@ Score a lead with the local RAG scorer:
 curl -X POST http://localhost:8080/v1/leads/<lead-id>/score
 ```
 
+Local scoring works without credentials. To use an OpenAI-compatible LLM instead, set an exact chat-completions endpoint and model in `.env.example`, then run `make restart`:
+
+```text
+LLM_API_URL=https://your-provider.example/v1/chat/completions
+LLM_API_KEY=your-api-key
+LLM_MODEL=your-model-name
+```
+
+The scorer sends the lead and retrieved similar leads as context, expects structured conversion probability and reasoning, and persists the provider model name with the score.
+
+Get the latest score and score history:
+
+```bash
+curl http://localhost:8080/v1/leads/<lead-id>/score
+curl "http://localhost:8080/v1/leads/<lead-id>/scores?limit=20"
+```
+
+Apply migrations after pulling schema changes:
+
+```bash
+make migrate
+```
+
+## Postman
+
+Import these files into Postman and run the collection in order:
+
+- `postman/lead-scoring-day4-day5.postman_collection.json`
+- `postman/lead-scoring-local.postman_environment.json`
+
+The collection automatically creates a unique lead and verifies:
+
+- First create request returns `201`.
+- Identical retry returns the original response with `X-Idempotent-Replay: true`.
+- Reusing the same idempotency key with another payload returns `409`.
+- Embedding refresh, similar-lead retrieval, RAG scoring, latest score, and score history all work.
+
 Reset local database volumes:
 
 ```bash
@@ -169,8 +206,36 @@ Update README and architecture notes with the Day 2 API surface.
 ## Day 3-5 Scope
 
 - Day 3: Redis read caching for lead list/detail endpoints.
-- Day 4: idempotency keys for create-lead requests and content hashing for embeddings.
-- Day 5: practical RAG with pgvector similarity search and local scoring that writes to `lead_scores`.
+- Day 4: atomic Redis idempotency, concurrent-request protection, payload-conflict detection, and content hashing for embeddings.
+- Day 5: practical RAG with pgvector similarity search, local or OpenAI-compatible LLM scoring, latest score, and score history.
+
+## Day 4 Schedule
+
+`7:00-7:30`
+Understand at-least-once delivery, retries, idempotency keys, and why a plain Redis `GET` followed by `SET` is not atomic.
+
+`7:30-8:00`
+Design the idempotency state machine: proceed, replay, conflicting payload, and request in progress.
+
+`8:00-9:15`
+Run the Postman Day 4 folder and inspect Redis keys in Redis Commander.
+
+`9:15-10:00`
+Review logs, update docs, and commit with `feat: harden create lead idempotency`.
+
+## Day 5 Schedule
+
+`7:00-7:30`
+Understand embeddings, cosine distance, RAG context, and the separation between retrieval and scoring.
+
+`7:30-8:00`
+Design synchronous scoring now and the future async worker path.
+
+`8:00-9:15`
+Run the Postman Day 5 folder and inspect `lead_embeddings` and `lead_scores` in Adminer.
+
+`9:15-10:00`
+Review score reasoning, run tests, and commit with `feat: complete rag scoring workflow`.
 
 ## Day 1 Commit Message
 
