@@ -18,6 +18,9 @@ type Config struct {
 	LLMAPIURL          string
 	LLMAPIKey          string
 	LLMModel           string
+	EmbeddingAPIURL    string
+	EmbeddingAPIKey    string
+	EmbeddingModel     string
 }
 
 func Load() Config {
@@ -34,6 +37,9 @@ func Load() Config {
 		LLMAPIURL:          getEnv("LLM_API_URL", ""),
 		LLMAPIKey:          getEnv("LLM_API_KEY", ""),
 		LLMModel:           getEnv("LLM_MODEL", ""),
+		EmbeddingAPIURL:    getEnv("EMBEDDING_API_URL", ""),
+		EmbeddingAPIKey:    getEnv("EMBEDDING_API_KEY", ""),
+		EmbeddingModel:     getEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
 	}
 }
 

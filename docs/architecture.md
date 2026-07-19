@@ -45,7 +45,7 @@ Browser -> Redis Commander  -> Redis
 
 RAG flow:
 
-Lead Created -> Local Embedding -> pgvector -> Similar Lead Retrieval -> Local/Remote LLM Scorer -> lead_scores
+Lead Created -> Embedder (local hash or remote) -> pgvector -> Similar Lead Retrieval (same model) -> Remote LLM Scorer with local fallback -> lead_scores
 ```
 
 ## Low-Level Design
@@ -58,8 +58,8 @@ Lead Created -> Local Embedding -> pgvector -> Similar Lead Retrieval -> Local/R
 - Lead service: validates and normalizes lead data.
 - Lead repository: owns SQL persistence.
 - Read API path: lists and fetches leads with bounded pagination.
-- Embedding path: converts lead text into deterministic local embeddings and stores them in pgvector.
-- Scoring path: retrieves similar leads, invokes the configured local or OpenAI-compatible scorer, and writes conversion probability + reasoning into `lead_scores`.
+- Embedding path: uses an `Embedder` interface. Default is deterministic local hash vectors (`local-hash-embedding-v1`); optional OpenAI-compatible remote embeddings via `EMBEDDING_API_*`. Upserts skip when `content_hash` is unchanged.
+- Scoring path: retrieves similar leads filtered by `embedding_model`, sends redacted lead context plus enriched neighbor firmographics/status to the configured local or OpenAI-compatible scorer (with local fallback), and writes conversion probability + reasoning into `lead_scores`.
 - Idempotency path: uses an atomic Redis Lua script to bind a key to one request payload, protect concurrent creates, and replay the stored response.
 
 ### Database Schema
@@ -112,10 +112,16 @@ SELECT
     l.id,
     l.company_name,
     l.industry,
-    1 - (e.embedding <=> $1::vector) AS similarity
+    COALESCE(l.company_size, 0),
+    COALESCE(l.annual_revenue, 0)::float8,
+    COALESCE(l.notes, ''),
+    l.status,
+    1 - (e.embedding <=> $3::vector) AS similarity
 FROM lead_embeddings e
 JOIN leads l ON l.id = e.lead_id
-ORDER BY e.embedding <=> $1::vector
+WHERE e.lead_id <> $1
+  AND e.embedding_model = $2
+ORDER BY e.embedding <=> $3::vector
 LIMIT 5;
 ```
 
@@ -131,3 +137,6 @@ LIMIT 5;
 - Day 3 caches lead reads in Redis with short TTLs and invalidates list caches after writes.
 - Day 4 uses atomic Redis operations for safe create retries, detects conflicting payloads, and uses SHA-256 content hashes for embedding updates.
 - Day 5 keeps RAG in Postgres with pgvector before introducing heavier vector infrastructure, while preserving score history for evaluation.
+- Semantic embeddings are pluggable: local hash for offline demos, remote OpenAI-compatible embeddings for production retrieval quality.
+- Similarity search is scoped to one `embedding_model` so local and remote vector spaces never mix.
+- Remote LLM scoring redacts email/phone and falls back to the local heuristic scorer on provider failure.

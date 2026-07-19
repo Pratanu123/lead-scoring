@@ -136,15 +136,24 @@ Score a lead with the local RAG scorer:
 curl -X POST http://localhost:8080/v1/leads/<lead-id>/score
 ```
 
-Local scoring works without credentials. To use an OpenAI-compatible LLM instead, set an exact chat-completions endpoint and model in `.env.example`, then run `make restart`:
+Local scoring and local hash embeddings work without credentials. To use OpenAI-compatible APIs instead, copy `.env.example` to `.env`, set the endpoints and models, then run `make restart`:
 
 ```text
 LLM_API_URL=https://your-provider.example/v1/chat/completions
 LLM_API_KEY=your-api-key
 LLM_MODEL=your-model-name
+EMBEDDING_API_URL=https://your-provider.example/v1/embeddings
+EMBEDDING_API_KEY=your-api-key
+EMBEDDING_MODEL=text-embedding-3-small
 ```
 
-The scorer sends the lead and retrieved similar leads as context, expects structured conversion probability and reasoning, and persists the provider model name with the score.
+Behavior:
+
+- Embeddings default to `local-hash-embedding-v1`. When `EMBEDDING_API_URL` is set, the API uses a remote embeddings provider and stores vectors under that model name.
+- Unchanged lead text skips re-embedding via SHA-256 `content_hash`.
+- Similar-lead search filters by `embedding_model` so local and remote vectors never mix.
+- The scorer sends redacted lead + enriched similar-lead context (notes, size, revenue, status), expects structured conversion probability and reasoning, and persists the provider model name with the score.
+- Remote LLM scoring falls back to the local heuristic scorer if the provider call fails.
 
 Get the latest score and score history:
 

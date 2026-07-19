@@ -13,6 +13,7 @@ import (
 	"lead-scoring/internal/config"
 	httpapi "lead-scoring/internal/http"
 	leadcontroller "lead-scoring/internal/lead/controller"
+	"lead-scoring/internal/lead/embedding"
 	leadrepository "lead-scoring/internal/lead/repository"
 	leadscoring "lead-scoring/internal/lead/scoring"
 	leadservice "lead-scoring/internal/lead/service"
@@ -44,12 +45,23 @@ func main() {
 	defer redisClient.Close()
 
 	leadRepo := leadrepository.NewPostgresRepository(db)
+
+	var leadEmbedder embedding.Embedder = embedding.NewLocalEmbedder()
+	if cfg.EmbeddingAPIURL != "" {
+		leadEmbedder = embedding.NewRemoteEmbedder(cfg.EmbeddingAPIURL, cfg.EmbeddingAPIKey, cfg.EmbeddingModel)
+		logger.Info("remote embedding enabled", "model", leadEmbedder.Model())
+	}
+
 	var leadScorer leadscoring.Scorer = leadscoring.NewLocalScorer()
 	if cfg.LLMAPIURL != "" && cfg.LLMModel != "" {
-		leadScorer = leadscoring.NewRemoteScorer(cfg.LLMAPIURL, cfg.LLMAPIKey, cfg.LLMModel)
-		logger.Info("remote llm scorer enabled", "model", cfg.LLMModel)
+		leadScorer = leadscoring.NewFallbackScorer(
+			leadscoring.NewRemoteScorer(cfg.LLMAPIURL, cfg.LLMAPIKey, cfg.LLMModel),
+			leadscoring.NewLocalScorer(),
+		)
+		logger.Info("remote llm scorer enabled with local fallback", "model", cfg.LLMModel)
 	}
-	leadSvc := leadservice.NewLeadService(leadRepo, redisClient, leadScorer)
+
+	leadSvc := leadservice.NewLeadService(leadRepo, redisClient, leadScorer, leadEmbedder, logger)
 
 	var opensearchClient *opensearch.Client
 	if cfg.OpenSearchEnabled {

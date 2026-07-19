@@ -43,12 +43,24 @@ type EmbeddingResult struct {
 }
 
 type SimilarLead struct {
-	ID          string  `json:"id"`
-	CompanyName string  `json:"company_name"`
-	Email       string  `json:"email"`
-	Source      string  `json:"source"`
-	Industry    string  `json:"industry,omitempty"`
-	Similarity  float64 `json:"similarity"`
+	ID            string  `json:"id"`
+	CompanyName   string  `json:"company_name"`
+	Email         string  `json:"email,omitempty"`
+	Source        string  `json:"source"`
+	Industry      string  `json:"industry,omitempty"`
+	CompanySize   int     `json:"company_size,omitempty"`
+	AnnualRevenue float64 `json:"annual_revenue,omitempty"`
+	Notes         string  `json:"notes,omitempty"`
+	Status        string  `json:"status,omitempty"`
+	Similarity    float64 `json:"similarity"`
+}
+
+type EmbeddingRecord struct {
+	LeadID      string
+	Model       string
+	ContentHash string
+	Vector      string
+	CreatedAt   time.Time
 }
 
 type LeadScore struct {
