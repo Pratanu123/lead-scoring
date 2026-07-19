@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	leadcontroller "lead-scoring/internal/lead/controller"
+	appmetrics "lead-scoring/internal/platform/appmetrics"
+	"lead-scoring/internal/platform/auth"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -64,7 +69,7 @@ func (m *Metrics) Format() string {
 	output += "# HELP http_requests_by_method Total requests by method\n"
 	output += "# TYPE http_requests_by_method gauge\n"
 	for method, count := range m.requestsByMethod {
-		output += fmt.Sprintf("http_requests_by_method{method=\"%s\"} %d\n", method, count)
+		output += fmt.Sprintf("http_requests_by_method{method=%q} %d\n", method, count)
 	}
 
 	output += "# HELP http_requests_by_status Total requests by status code\n"
@@ -78,27 +83,35 @@ func (m *Metrics) Format() string {
 
 type RouterDeps struct {
 	LeadHandler *leadcontroller.LeadHandler
+	WSHub       *WSHub
 	DB          *sql.DB
 	Redis       *redis.Client
 	Logger      *slog.Logger
+	APIKey      string
+	RateLimit   int
+	ScoreLimit  int
+	AppMetrics  *appmetrics.Registry
+	StaticDir   string
 }
 
 func NewRouter(deps RouterDeps) http.Handler {
 	mux := http.NewServeMux()
 	metrics := NewMetrics()
+	if deps.AppMetrics == nil {
+		deps.AppMetrics = appmetrics.NewRegistry()
+	}
 
-	// Metrics endpoint
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(metrics.Format()))
+		_, _ = w.Write([]byte(deps.AppMetrics.Format()))
 	})
 
-	// Health endpoint
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -134,43 +147,71 @@ func NewRouter(deps RouterDeps) http.Handler {
 		metrics.RecordRequest(r.Method, statusCode, time.Since(start))
 	})
 
-	// Middleware to track metrics
 	metricsMiddleware := func(handler http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-
-			// Create response wrapper to capture status code
 			rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-
 			handler(rw, r)
-
 			metrics.RecordRequest(r.Method, rw.statusCode, time.Since(start))
 		}
 	}
 
-	// Lead endpoints with metrics
 	mux.HandleFunc("/create-lead", metricsMiddleware(deps.LeadHandler.CreateLead))
 	mux.HandleFunc("/v1/create-lead", metricsMiddleware(deps.LeadHandler.CreateLead))
 	mux.HandleFunc("/v1/create-leads", metricsMiddleware(deps.LeadHandler.CreateLead))
 	mux.HandleFunc("/v1/get-leads", metricsMiddleware(deps.LeadHandler.ListLeads))
 	mux.HandleFunc("/v1/get-leads/{id}", metricsMiddleware(deps.LeadHandler.GetLead))
 
-	// Backward-compatible REST-style aliases.
 	mux.HandleFunc("POST /v1/leads", metricsMiddleware(deps.LeadHandler.CreateLead))
 	mux.HandleFunc("GET /v1/leads", metricsMiddleware(deps.LeadHandler.ListLeads))
 	mux.HandleFunc("GET /v1/leads/{id}", metricsMiddleware(deps.LeadHandler.GetLead))
+	mux.HandleFunc("PATCH /v1/leads/{id}", metricsMiddleware(deps.LeadHandler.UpdateLeadStatus))
 
-	// RAG and scoring endpoints.
 	mux.HandleFunc("POST /v1/leads/{id}/embeddings", metricsMiddleware(deps.LeadHandler.UpsertLeadEmbedding))
 	mux.HandleFunc("GET /v1/leads/{id}/similar", metricsMiddleware(deps.LeadHandler.SimilarLeads))
 	mux.HandleFunc("POST /v1/leads/{id}/score", metricsMiddleware(deps.LeadHandler.ScoreLead))
 	mux.HandleFunc("GET /v1/leads/{id}/score", metricsMiddleware(deps.LeadHandler.GetLatestLeadScore))
 	mux.HandleFunc("GET /v1/leads/{id}/scores", metricsMiddleware(deps.LeadHandler.ListLeadScores))
+	mux.HandleFunc("GET /v1/jobs/{id}", metricsMiddleware(deps.LeadHandler.GetJob))
 
-	return mux
+	if deps.WSHub != nil {
+		mux.HandleFunc("GET /v1/ws", deps.WSHub.Handle)
+	}
+
+	if deps.StaticDir != "" {
+		if info, err := os.Stat(deps.StaticDir); err == nil && info.IsDir() {
+			fileServer := http.FileServer(http.Dir(deps.StaticDir))
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/v1/") ||
+					r.URL.Path == "/healthz" ||
+					r.URL.Path == "/metrics" ||
+					r.URL.Path == "/create-lead" {
+					http.NotFound(w, r)
+					return
+				}
+
+				requested := filepath.Join(deps.StaticDir, filepath.Clean("/"+r.URL.Path))
+				if !strings.HasPrefix(requested, filepath.Clean(deps.StaticDir)+string(os.PathSeparator)) &&
+					filepath.Clean(requested) != filepath.Clean(deps.StaticDir) {
+					http.NotFound(w, r)
+					return
+				}
+
+				if st, err := os.Stat(requested); err == nil && !st.IsDir() {
+					fileServer.ServeHTTP(w, r)
+					return
+				}
+
+				index := filepath.Join(deps.StaticDir, "index.html")
+				http.ServeFile(w, r, index)
+			})
+		}
+	}
+
+	authMiddleware := auth.NewMiddleware(deps.APIKey, deps.Redis, deps.RateLimit, deps.ScoreLimit)
+	return authMiddleware.Wrap(mux)
 }
 
-// responseWriter wraps http.ResponseWriter to capture status code
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int

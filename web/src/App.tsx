@@ -1,0 +1,36 @@
+import type { ReactNode } from 'react'
+import { Navigate, Route, Routes } from 'react-router-dom'
+import { getApiKey } from './api'
+import LoginPage from './pages/LoginPage'
+import LeadsPage from './pages/LeadsPage'
+import LeadDetailPage from './pages/LeadDetailPage'
+
+function RequireAuth({ children }: { children: ReactNode }) {
+  if (!getApiKey()) return <Navigate to="/login" replace />
+  return children
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/"
+        element={
+          <RequireAuth>
+            <LeadsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/leads/:id"
+        element={
+          <RequireAuth>
+            <LeadDetailPage />
+          </RequireAuth>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}

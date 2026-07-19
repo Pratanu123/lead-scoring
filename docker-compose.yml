@@ -16,6 +16,20 @@ services:
       redis:
         condition: service_healthy
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lead-scoring-worker
+    command: ["/app/worker"]
+    env_file:
+      - .env.example
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: lead-scoring-postgres
@@ -123,6 +137,8 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      - api
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep -q 'Healthy'"]
       interval: 10s
@@ -138,11 +154,13 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/lead-scoring.json
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
     depends_on:
       - prometheus
-      - opensearch-dashboards
     healthcheck:
       test: ["CMD-SHELL", "curl -s -f http://localhost:3000/api/health | grep -q 'ok'"]
       interval: 10s

@@ -17,7 +17,9 @@ import (
 	leadrepository "lead-scoring/internal/lead/repository"
 	leadscoring "lead-scoring/internal/lead/scoring"
 	leadservice "lead-scoring/internal/lead/service"
+	appmetrics "lead-scoring/internal/platform/appmetrics"
 	"lead-scoring/internal/platform/idempotency"
+	"lead-scoring/internal/platform/jobs"
 	opensearch "lead-scoring/internal/platform/opensearch"
 	"lead-scoring/internal/platform/postgres"
 	redisclient "lead-scoring/internal/platform/redis"
@@ -26,6 +28,7 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config.Load()
+	metricsRegistry := appmetrics.NewRegistry()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -45,6 +48,7 @@ func main() {
 	defer redisClient.Close()
 
 	leadRepo := leadrepository.NewPostgresRepository(db)
+	jobStore := jobs.NewStore(db, redisClient)
 
 	var leadEmbedder embedding.Embedder = embedding.NewLocalEmbedder()
 	if cfg.EmbeddingAPIURL != "" {
@@ -57,11 +61,11 @@ func main() {
 		leadScorer = leadscoring.NewFallbackScorer(
 			leadscoring.NewRemoteScorer(cfg.LLMAPIURL, cfg.LLMAPIKey, cfg.LLMModel),
 			leadscoring.NewLocalScorer(),
-		)
+		).WithFallbackHook(metricsRegistry.IncLLMFallback)
 		logger.Info("remote llm scorer enabled with local fallback", "model", cfg.LLMModel)
 	}
 
-	leadSvc := leadservice.NewLeadService(leadRepo, redisClient, leadScorer, leadEmbedder, logger)
+	leadSvc := leadservice.NewLeadService(leadRepo, redisClient, leadScorer, leadEmbedder, jobStore, metricsRegistry, logger)
 
 	var opensearchClient *opensearch.Client
 	if cfg.OpenSearchEnabled {
@@ -70,12 +74,19 @@ func main() {
 
 	idempotencyStore := idempotency.NewStore(redisClient)
 	leadHandler := leadcontroller.NewLeadHandler(leadSvc, logger, opensearchClient, idempotencyStore)
+	wsHub := httpapi.NewWSHub(jobStore, cfg.APIKey, logger)
 
 	router := httpapi.NewRouter(httpapi.RouterDeps{
 		LeadHandler: leadHandler,
+		WSHub:       wsHub,
 		DB:          db,
 		Redis:       redisClient,
 		Logger:      logger,
+		APIKey:      cfg.APIKey,
+		RateLimit:   cfg.RateLimitPerMinute,
+		ScoreLimit:  cfg.ScoreRateLimitRPM,
+		AppMetrics:  metricsRegistry,
+		StaticDir:   cfg.StaticDir,
 	})
 
 	server := &http.Server{

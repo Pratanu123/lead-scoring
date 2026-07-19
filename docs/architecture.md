@@ -3,140 +3,90 @@
 ## High-Level Design
 
 ```text
-Client / CRM
+Browser UI / Client / CRM
     |
-    v
-Go API
+    +--> Go API (auth + rate limit)
+    |       |
+    |       +--> Lead Controller / Service / Repository
+    |       +--> Jobs enqueue (Postgres + Redis queue)
+    |       +--> WebSocket job events
+    |       +--> Static web UI
     |
-    +--> Lead Controller
-    |       |
-    |       v
-    |   Lead Service
-    |       |
-    |       v
-    |   Lead Repository
-    |       |
-    |       v
-    |   Postgres
-    |
-    +--> Redis
+    +--> Go Worker
             |
-            +--> cache, idempotency
+            +--> Embedder (local or remote)
+            +--> Scorer (local or remote + fallback)
+            +--> Postgres / Redis
 
 Observability:
 
 Go API JSON logs -> Vector -> OpenSearch -> OpenSearch Dashboards
-Go API /metrics -> Prometheus -> Grafana
+Go API /metrics -> Prometheus -> Grafana (provisioned Lead Scoring dashboard)
 
 Scale-out path:
 
-Client / CRM
+Client
     -> Load Balancer
-        -> API Instance 1
-        -> API Instance 2
         -> API Instance N
+        -> Worker Instance N
             -> Shared Postgres
             -> Shared Redis
-
-Local developer UIs:
-
-Browser -> Adminer          -> Postgres
-Browser -> Redis Commander  -> Redis
-
-RAG flow:
-
-Lead Created -> Embedder (local hash or remote) -> pgvector -> Similar Lead Retrieval (same model) -> Remote LLM Scorer with local fallback -> lead_scores
 ```
 
 ## Low-Level Design
 
 ### Services
 
-- API service: receives lead ingestion requests and exposes scoring endpoints.
+- API service: authenticated lead APIs, async job enqueue, WebSocket updates, static UI.
+- Worker service: claims embed/score jobs from Redis, executes RAG pipeline, updates job state.
 - Postgres UI: Adminer for local schema/data inspection.
 - Redis UI: Redis Commander for local key inspection.
-- Lead service: validates and normalizes lead data.
+- Lead service: validates/normalizes leads, caches reads/scores, enqueues jobs.
 - Lead repository: owns SQL persistence.
-- Read API path: lists and fetches leads with bounded pagination.
-- Embedding path: uses an `Embedder` interface. Default is deterministic local hash vectors (`local-hash-embedding-v1`); optional OpenAI-compatible remote embeddings via `EMBEDDING_API_*`. Upserts skip when `content_hash` is unchanged.
-- Scoring path: retrieves similar leads filtered by `embedding_model`, sends redacted lead context plus enriched neighbor firmographics/status to the configured local or OpenAI-compatible scorer (with local fallback), and writes conversion probability + reasoning into `lead_scores`.
-- Idempotency path: uses an atomic Redis Lua script to bind a key to one request payload, protect concurrent creates, and replay the stored response.
+- Embedding path: pluggable `Embedder` (`local-hash-embedding-v1` or OpenAI-compatible remote).
+- Scoring path: similar leads filtered by embedding model, redacted LLM context, local fallback.
+- Idempotency path: atomic Redis Lua for create-lead retries.
+- Auth path: shared `API_KEY` bearer auth and Redis fixed-window rate limits.
 
 ### Database Schema
 
-- `leads`: source-of-truth CRM lead profile.
-- `lead_embeddings`: vector representation of lead text using `vector(1536)`.
-- `lead_scores`: model output with conversion probability and reasoning.
+- `leads`: CRM lead profile including outcome `status`.
+- `lead_embeddings`: vector representation using `vector(1536)`.
+- `lead_scores`: conversion probability + reasoning history.
+- `jobs`: async embed/score job state machine.
 
 ### APIs
 
 ```text
 GET  /healthz
-POST /create-lead
-POST /v1/create-lead
-POST /v1/create-leads
+GET  /metrics
+GET  /                 (web UI)
 POST /v1/leads
 GET  /v1/leads
 GET  /v1/leads/{id}
-GET  /v1/get-leads
-GET  /v1/get-leads/{id}
+PATCH /v1/leads/{id}
 POST /v1/leads/{id}/embeddings
 GET  /v1/leads/{id}/similar
-POST /v1/leads/{id}/score
+POST /v1/leads/{id}/score      -> 202 + job_id
 GET  /v1/leads/{id}/score
 GET  /v1/leads/{id}/scores
+GET  /v1/jobs/{id}
+GET  /v1/ws?lead_id=...&token=...
 ```
 
-## RAG Storage Example
+## Async RAG Flow
 
-Store an embedding:
-
-```sql
-INSERT INTO lead_embeddings (
-    lead_id,
-    embedding_model,
-    content_hash,
-    embedding
-) VALUES (
-    $1,
-    'text-embedding-3-small',
-    $2,
-    $3::vector
-);
-```
-
-Query similar leads:
-
-```sql
-SELECT
-    l.id,
-    l.company_name,
-    l.industry,
-    COALESCE(l.company_size, 0),
-    COALESCE(l.annual_revenue, 0)::float8,
-    COALESCE(l.notes, ''),
-    l.status,
-    1 - (e.embedding <=> $3::vector) AS similarity
-FROM lead_embeddings e
-JOIN leads l ON l.id = e.lead_id
-WHERE e.lead_id <> $1
-  AND e.embedding_model = $2
-ORDER BY e.embedding <=> $3::vector
-LIMIT 5;
+```text
+CreateLead -> enqueue embed job -> worker embeds into pgvector
+ScoreLead  -> enqueue score job -> worker retrieves similar -> scores -> lead_scores
+UI         -> WebSocket job events -> refresh latest score
 ```
 
 ## Scaling Notes
 
 - Postgres remains the transactional source of truth.
-- pgvector avoids an extra vector database while the project is small to mid-scale.
-- Redis is reserved for idempotency keys, short-lived scoring cache, and rate limiting.
-- Embeddings and scoring should move to async workers once lead creation latency matters.
-- Day 2 keeps the API stateless, so horizontal scaling is just more API instances behind a load balancer.
-- `GET /v1/leads` enforces bounded `limit` and `offset` values to avoid unbounded scans.
-- The same service/repository layers now back both write and read paths, which keeps controller logic thin as the surface area grows.
-- Day 3 caches lead reads in Redis with short TTLs and invalidates list caches after writes.
-- Day 4 uses atomic Redis operations for safe create retries, detects conflicting payloads, and uses SHA-256 content hashes for embedding updates.
-- Day 5 keeps RAG in Postgres with pgvector before introducing heavier vector infrastructure, while preserving score history for evaluation.
-- Semantic embeddings are pluggable: local hash for offline demos, remote OpenAI-compatible embeddings for production retrieval quality.
-- Similarity search is scoped to one `embedding_model` so local and remote vector spaces never mix.
-- Remote LLM scoring redacts email/phone and falls back to the local heuristic scorer on provider failure.
+- pgvector is sufficient before introducing a dedicated vector DB.
+- Redis handles idempotency, read/score cache, rate limits, job wake signals, and pub/sub events.
+- API is stateless; add more API/worker replicas behind a load balancer as needed.
+- Similarity search is scoped to one `embedding_model`.
+- Remote LLM scoring redacts email/phone and falls back to the local heuristic scorer.

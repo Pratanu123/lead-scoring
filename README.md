@@ -1,142 +1,104 @@
 # lead-scoring
 
-Production-grade AI lead scoring backend with CRM-style ingestion, retrieval-augmented lead comparison, and AI-assisted conversion scoring.
+Local Docker production-ready AI lead scoring stack: CRM-style ingestion, async RAG scoring, authenticated API, WebSocket job updates, minimal web UI, and provisioned Grafana dashboards.
 
-## Day 1 Scope
+## What you get
 
-- Clean Go HTTP API skeleton.
-- Docker Compose with Postgres + pgvector and Redis.
-- Local browser UIs for Postgres and Redis.
-- Postgres schema for leads, embeddings, and AI scores.
-- Working `POST /create-lead` endpoint.
-- Health endpoint that checks Postgres and Redis.
+- Go API + worker
+- Postgres + pgvector, Redis
+- Async embed/score jobs with live WebSocket status
+- API key auth + Redis rate limits
+- Lead status/outcome updates for RAG feedback
+- Minimal professional web UI at `http://localhost:8080`
+- Prometheus metrics + Grafana Lead Scoring dashboard
+- OpenSearch log pipeline via Vector
 
-## Day 2 Scope
-
-- Scalability basics applied to a stateless Go API.
-- Load-balancer-friendly lead API shape.
-- Service-backed `GET /v1/leads` and `GET /v1/leads/{id}` endpoints.
-- Read-path notes for pagination and horizontal scaling.
-
-## Local Setup
-
-Install Go on macOS only if you want to run Go commands outside Docker:
+## Quick start
 
 ```bash
-brew install go
-```
-
-Most daily commands are available through `make`:
-
-```bash
-make help
 make dev
-make test
-make logs
+make migrate   # required if the DB volume already existed before jobs migration
 ```
 
-Run Go module tidy inside Docker when dependencies change:
+Open:
 
-```bash
-make tidy
-```
-
-Run the full stack directly with Docker if you prefer:
-
-```bash
-docker compose up --build -d
-```
-
-Health check:
-
-```bash
-curl http://localhost:8080/healthz
-```
-
-Developer UIs:
-
-- API: http://localhost:8080
-- Postgres UI: http://localhost:8081
-- Redis UI: http://localhost:8082
-- Grafana: http://localhost:3000
-- OpenSearch Dashboards: http://localhost:5601
+- UI: http://localhost:8080
+- API health: http://localhost:8080/healthz
+- Grafana: http://localhost:3000 (`admin` / `admin`) → folder **Lead Scoring**
 - Prometheus: http://localhost:9090
+- Adminer: http://localhost:8081
+- Redis Commander: http://localhost:8082
+- OpenSearch Dashboards: http://localhost:5601
 
-OpenSearch Dashboards login:
-
-```text
-Username: admin
-Password: SecureLeadScore_2024!
-```
-
-To view API logs in OpenSearch Dashboards:
-
-1. Open `http://localhost:5601`.
-2. Go to `Dashboards Management` -> `Index patterns`.
-3. Use `logs-*` as the index pattern. Do not use `log-*`.
-4. Choose `time` as the time field.
-5. Open `Discover`, select `logs-*`, and set the time picker to `Last 24 hours`.
-
-Postgres UI login:
+Default API key (also used by the UI login):
 
 ```text
-System: PostgreSQL
-Server: postgres
-Username: root
-Password: root
-Database: lead_scoring
+dev-lead-scoring-key
 ```
 
-Create a lead:
+## Auth
+
+All `/v1/*` write/read APIs require:
+
+```text
+Authorization: Bearer dev-lead-scoring-key
+```
+
+`/healthz` and `/metrics` remain open for probes and Prometheus.
+
+## Core API examples
+
+Create a lead (queues an embed job):
 
 ```bash
-curl -X POST http://localhost:8080/v1/create-leads \
+curl -X POST http://localhost:8080/v1/leads \
+  -H "Authorization: Bearer dev-lead-scoring-key" \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: acme-logistics-demo-1" \
+  -H "Idempotency-Key: demo-1" \
   -d '{
     "company_name": "Acme Logistics",
     "contact_name": "Riya Shah",
     "email": "riya@acmelogistics.example",
-    "phone": "+91-9999999999",
     "source": "webinar",
     "industry": "logistics",
     "company_size": 250,
     "annual_revenue": 12000000,
-    "notes": "Interested in CRM automation and dialer integrations"
+    "notes": "Interested in CRM automation"
   }'
 ```
 
-List leads:
+Enqueue scoring (returns `202` + `job_id`):
 
 ```bash
-curl "http://localhost:8080/v1/get-leads?limit=10&offset=0"
+curl -X POST http://localhost:8080/v1/leads/<lead-id>/score \
+  -H "Authorization: Bearer dev-lead-scoring-key"
 ```
 
-Get one lead:
+Poll job status:
 
 ```bash
-curl http://localhost:8080/v1/get-leads/<lead-id>
+curl http://localhost:8080/v1/jobs/<job-id> \
+  -H "Authorization: Bearer dev-lead-scoring-key"
 ```
 
-Store or refresh a lead embedding:
+Update outcome status:
 
 ```bash
-curl -X POST http://localhost:8080/v1/leads/<lead-id>/embeddings
+curl -X PATCH http://localhost:8080/v1/leads/<lead-id> \
+  -H "Authorization: Bearer dev-lead-scoring-key" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"won"}'
 ```
 
-Retrieve similar leads:
+WebSocket job stream:
 
-```bash
-curl "http://localhost:8080/v1/leads/<lead-id>/similar?limit=5"
+```text
+ws://localhost:8080/v1/ws?lead_id=<lead-id>&token=dev-lead-scoring-key
 ```
 
-Score a lead with the local RAG scorer:
+## Optional remote AI providers
 
-```bash
-curl -X POST http://localhost:8080/v1/leads/<lead-id>/score
-```
-
-Local scoring and local hash embeddings work without credentials. To use OpenAI-compatible APIs instead, copy `.env.example` to `.env`, set the endpoints and models, then run `make restart`:
+Copy `.env.example` values into a local `.env` override or edit `.env.example`, then `make restart`:
 
 ```text
 LLM_API_URL=https://your-provider.example/v1/chat/completions
@@ -147,107 +109,36 @@ EMBEDDING_API_KEY=your-api-key
 EMBEDDING_MODEL=text-embedding-3-small
 ```
 
-Behavior:
+Local hash embeddings + heuristic scoring work with no credentials. Remote LLM scoring falls back to the local scorer on failure.
 
-- Embeddings default to `local-hash-embedding-v1`. When `EMBEDDING_API_URL` is set, the API uses a remote embeddings provider and stores vectors under that model name.
-- Unchanged lead text skips re-embedding via SHA-256 `content_hash`.
-- Similar-lead search filters by `embedding_model` so local and remote vectors never mix.
-- The scorer sends redacted lead + enriched similar-lead context (notes, size, revenue, status), expects structured conversion probability and reasoning, and persists the provider model name with the score.
-- Remote LLM scoring falls back to the local heuristic scorer if the provider call fails.
-
-Get the latest score and score history:
+## Makefile helpers
 
 ```bash
-curl http://localhost:8080/v1/leads/<lead-id>/score
-curl "http://localhost:8080/v1/leads/<lead-id>/scores?limit=20"
-```
-
-Apply migrations after pulling schema changes:
-
-```bash
-make migrate
+make help
+make health
+make lead
+make score LEAD_ID=<id>
+make job JOB_ID=<id>
+make status LEAD_ID=<id> STATUS=won
+make test
+make reset
 ```
 
 ## Postman
 
-Import these files into Postman and run the collection in order:
+Import:
 
-- `postman/lead-scoring-day4-day5.postman_collection.json`
+- `postman/lead-scoring-mvp.postman_collection.json`
 - `postman/lead-scoring-local.postman_environment.json`
 
-The collection automatically creates a unique lead and verifies:
+The environment includes `apiKey=dev-lead-scoring-key`.
 
-- First create request returns `201`.
-- Identical retry returns the original response with `X-Idempotent-Replay: true`.
-- Reusing the same idempotency key with another payload returns `409`.
-- Embedding refresh, similar-lead retrieval, RAG scoring, latest score, and score history all work.
-
-Reset local database volumes:
-
-```bash
-make reset
-```
-
-## Architecture Docs
+## Architecture
 
 See [docs/architecture.md](docs/architecture.md).
 
-## Day 2 Schedule
+## Monitoring
 
-`7:00-7:30`
-Scalability basics for stateless APIs, connection pools, and pagination limits.
+See [MONITORING_GUIDE.md](MONITORING_GUIDE.md) and [QUICK_START_MONITORING.md](QUICK_START_MONITORING.md).
 
-`7:30-8:00`
-Design a load-balanced lead API with multiple app instances behind a reverse proxy.
-
-`8:00-8:45`
-Implement repository and service read methods.
-
-`8:45-9:15`
-Add controllers and routes for list/detail lead APIs.
-
-`9:15-9:40`
-Commit with `feat: add lead read APIs`.
-
-`9:40-10:00`
-Update README and architecture notes with the Day 2 API surface.
-
-## Day 3-5 Scope
-
-- Day 3: Redis read caching for lead list/detail endpoints.
-- Day 4: atomic Redis idempotency, concurrent-request protection, payload-conflict detection, and content hashing for embeddings.
-- Day 5: practical RAG with pgvector similarity search, local or OpenAI-compatible LLM scoring, latest score, and score history.
-
-## Day 4 Schedule
-
-`7:00-7:30`
-Understand at-least-once delivery, retries, idempotency keys, and why a plain Redis `GET` followed by `SET` is not atomic.
-
-`7:30-8:00`
-Design the idempotency state machine: proceed, replay, conflicting payload, and request in progress.
-
-`8:00-9:15`
-Run the Postman Day 4 folder and inspect Redis keys in Redis Commander.
-
-`9:15-10:00`
-Review logs, update docs, and commit with `feat: harden create lead idempotency`.
-
-## Day 5 Schedule
-
-`7:00-7:30`
-Understand embeddings, cosine distance, RAG context, and the separation between retrieval and scoring.
-
-`7:30-8:00`
-Design synchronous scoring now and the future async worker path.
-
-`8:00-9:15`
-Run the Postman Day 5 folder and inspect `lead_embeddings` and `lead_scores` in Adminer.
-
-`9:15-10:00`
-Review score reasoning, run tests, and commit with `feat: complete rag scoring workflow`.
-
-## Day 1 Commit Message
-
-```text
-chore: bootstrap lead scoring API
-```
+Grafana is provisioned automatically with a Prometheus datasource and the **Lead Scoring** dashboard (request rate, score/embedding latency, jobs, LLM fallbacks, cache hit ratio).
