@@ -12,9 +12,14 @@ import (
 	"lead-scoring/internal/lead/domain"
 	"lead-scoring/internal/lead/embedding"
 	"lead-scoring/internal/lead/scoring"
+	appmetrics "lead-scoring/internal/platform/appmetrics"
 )
 
 const testLeadID = "11111111-1111-1111-1111-111111111111"
+
+func newTestService(repo *fakeRepository, scorer scoring.Scorer) *LeadService {
+	return NewLeadService(repo, nil, scorer, embedding.NewLocalEmbedder(), nil, appmetrics.NewRegistry(), discardLogger())
+}
 
 func TestScoreLeadPersistsRAGResult(t *testing.T) {
 	repo := &fakeRepository{
@@ -38,7 +43,7 @@ func TestScoreLeadPersistsRAGResult(t *testing.T) {
 		},
 	}
 
-	svc := NewLeadService(repo, nil, scoring.NewLocalScorer(), embedding.NewLocalEmbedder(), discardLogger())
+	svc := newTestService(repo, scoring.NewLocalScorer())
 	result, err := svc.ScoreLead(context.Background(), testLeadID)
 	if err != nil {
 		t.Fatalf("ScoreLead returned error: %v", err)
@@ -85,7 +90,7 @@ func TestUpsertLeadEmbeddingSkipsUnchangedContentHash(t *testing.T) {
 		},
 	}
 
-	svc := NewLeadService(repo, nil, scoring.NewLocalScorer(), embedding.NewLocalEmbedder(), discardLogger())
+	svc := newTestService(repo, scoring.NewLocalScorer())
 	result, err := svc.UpsertLeadEmbedding(context.Background(), testLeadID)
 	if err != nil {
 		t.Fatalf("UpsertLeadEmbedding returned error: %v", err)
@@ -117,7 +122,7 @@ func TestUpsertLeadEmbeddingWritesWhenHashChanges(t *testing.T) {
 		},
 	}
 
-	svc := NewLeadService(repo, nil, scoring.NewLocalScorer(), embedding.NewLocalEmbedder(), discardLogger())
+	svc := newTestService(repo, scoring.NewLocalScorer())
 	if _, err := svc.UpsertLeadEmbedding(context.Background(), testLeadID); err != nil {
 		t.Fatalf("UpsertLeadEmbedding returned error: %v", err)
 	}
@@ -127,13 +132,27 @@ func TestUpsertLeadEmbeddingWritesWhenHashChanges(t *testing.T) {
 	}
 }
 
+func TestUpdateLeadStatus(t *testing.T) {
+	repo := &fakeRepository{
+		lead: domain.Lead{ID: testLeadID, Status: "new"},
+	}
+	svc := newTestService(repo, scoring.NewLocalScorer())
+	lead, err := svc.UpdateLeadStatus(context.Background(), testLeadID, "won")
+	if err != nil {
+		t.Fatalf("UpdateLeadStatus returned error: %v", err)
+	}
+	if lead.Status != "won" {
+		t.Fatalf("expected won, got %q", lead.Status)
+	}
+}
+
 func TestLatestLeadScoreMapsMissingScore(t *testing.T) {
 	repo := &fakeRepository{
 		lead:           domain.Lead{ID: testLeadID},
 		latestScoreErr: sql.ErrNoRows,
 	}
 
-	svc := NewLeadService(repo, nil, scoring.NewLocalScorer(), embedding.NewLocalEmbedder(), discardLogger())
+	svc := newTestService(repo, scoring.NewLocalScorer())
 	_, err := svc.LatestLeadScore(context.Background(), testLeadID)
 	if !errors.Is(err, ErrScoreNotFound) {
 		t.Fatalf("expected ErrScoreNotFound, got %v", err)
@@ -145,7 +164,7 @@ func TestListLeadScoresBoundsLimit(t *testing.T) {
 		lead: domain.Lead{ID: testLeadID},
 	}
 
-	svc := NewLeadService(repo, nil, scoring.NewLocalScorer(), embedding.NewLocalEmbedder(), discardLogger())
+	svc := newTestService(repo, scoring.NewLocalScorer())
 	if _, err := svc.ListLeadScores(context.Background(), testLeadID, 1000); err != nil {
 		t.Fatalf("ListLeadScores returned error: %v", err)
 	}
@@ -181,6 +200,11 @@ func (f *fakeRepository) List(context.Context, domain.ListLeadsInput) ([]domain.
 }
 
 func (f *fakeRepository) GetByID(context.Context, string) (domain.Lead, error) {
+	return f.lead, nil
+}
+
+func (f *fakeRepository) UpdateStatus(_ context.Context, _ string, status string) (domain.Lead, error) {
+	f.lead.Status = status
 	return f.lead, nil
 }
 

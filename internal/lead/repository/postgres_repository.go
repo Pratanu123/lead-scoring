@@ -11,6 +11,7 @@ type Repository interface {
 	Create(ctx context.Context, input domain.CreateLeadInput) (domain.Lead, error)
 	List(ctx context.Context, input domain.ListLeadsInput) ([]domain.Lead, error)
 	GetByID(ctx context.Context, id string) (domain.Lead, error)
+	UpdateStatus(ctx context.Context, id string, status string) (domain.Lead, error)
 	GetEmbedding(ctx context.Context, leadID string, model string) (domain.EmbeddingRecord, error)
 	UpsertEmbedding(ctx context.Context, leadID string, model string, contentHash string, vector string) (domain.EmbeddingResult, error)
 	FindSimilar(ctx context.Context, leadID string, model string, vector string, limit int) ([]domain.SimilarLead, error)
@@ -171,6 +172,50 @@ WHERE id = $1;
 
 	var lead domain.Lead
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
+		&lead.ID,
+		&lead.CompanyName,
+		&lead.ContactName,
+		&lead.Email,
+		&lead.Phone,
+		&lead.Source,
+		&lead.Industry,
+		&lead.CompanySize,
+		&lead.AnnualRevenue,
+		&lead.Notes,
+		&lead.Status,
+		&lead.CreatedAt,
+		&lead.UpdatedAt,
+	)
+	if err != nil {
+		return domain.Lead{}, err
+	}
+
+	return lead, nil
+}
+
+func (r *PostgresRepository) UpdateStatus(ctx context.Context, id string, status string) (domain.Lead, error) {
+	const query = `
+UPDATE leads
+SET status = $2, updated_at = now()
+WHERE id = $1
+RETURNING
+    id,
+    company_name,
+    COALESCE(contact_name, ''),
+    email,
+    COALESCE(phone, ''),
+    source,
+    COALESCE(industry, ''),
+    COALESCE(company_size, 0),
+    COALESCE(annual_revenue, 0)::float8,
+    COALESCE(notes, ''),
+    status,
+    created_at,
+    updated_at;
+`
+
+	var lead domain.Lead
+	err := r.db.QueryRowContext(ctx, query, id, status).Scan(
 		&lead.ID,
 		&lead.CompanyName,
 		&lead.ContactName,

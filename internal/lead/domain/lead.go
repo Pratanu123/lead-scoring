@@ -35,6 +35,17 @@ type ListLeadsInput struct {
 	Offset int
 }
 
+type UpdateLeadStatusInput struct {
+	Status string `json:"status"`
+}
+
+type EnqueueScoreResult struct {
+	JobID  string `json:"job_id"`
+	LeadID string `json:"lead_id"`
+	Status string `json:"status"`
+	Type   string `json:"type"`
+}
+
 type EmbeddingResult struct {
 	LeadID      string    `json:"lead_id"`
 	Model       string    `json:"model"`

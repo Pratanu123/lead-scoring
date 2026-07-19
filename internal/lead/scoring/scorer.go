@@ -160,18 +160,28 @@ func (s *RemoteScorer) Score(ctx context.Context, lead domain.Lead, similarLeads
 
 // FallbackScorer tries the primary scorer and falls back on failure.
 type FallbackScorer struct {
-	primary  Scorer
-	fallback Scorer
+	primary    Scorer
+	fallback   Scorer
+	onFallback func()
 }
 
 func NewFallbackScorer(primary Scorer, fallback Scorer) *FallbackScorer {
 	return &FallbackScorer{primary: primary, fallback: fallback}
 }
 
+func (s *FallbackScorer) WithFallbackHook(hook func()) *FallbackScorer {
+	s.onFallback = hook
+	return s
+}
+
 func (s *FallbackScorer) Score(ctx context.Context, lead domain.Lead, similarLeads []domain.SimilarLead) (Decision, error) {
 	decision, err := s.primary.Score(ctx, lead, similarLeads)
 	if err == nil {
 		return decision, nil
+	}
+
+	if s.onFallback != nil {
+		s.onFallback()
 	}
 
 	fallbackDecision, fallbackErr := s.fallback.Score(ctx, lead, similarLeads)

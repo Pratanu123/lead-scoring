@@ -11,6 +11,9 @@ type Config struct {
 	RedisAddr          string
 	RedisPassword      string
 	RedisDB            int
+	APIKey             string
+	RateLimitPerMinute int
+	ScoreRateLimitRPM  int
 	OpenSearchEnabled  bool
 	OpenSearchURL      string
 	OpenSearchUser     string
@@ -21,6 +24,7 @@ type Config struct {
 	EmbeddingAPIURL    string
 	EmbeddingAPIKey    string
 	EmbeddingModel     string
+	StaticDir          string
 }
 
 func Load() Config {
@@ -30,6 +34,9 @@ func Load() Config {
 		RedisAddr:          getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:      getEnv("REDIS_PASSWORD", ""),
 		RedisDB:            getEnvInt("REDIS_DB", 0),
+		APIKey:             getEnv("API_KEY", "dev-lead-scoring-key"),
+		RateLimitPerMinute: getEnvInt("RATE_LIMIT_PER_MINUTE", 120),
+		ScoreRateLimitRPM:  getEnvInt("SCORE_RATE_LIMIT_PER_MINUTE", 30),
 		OpenSearchEnabled:  getEnvBool("OPENSEARCH_DIRECT_LOGS", false),
 		OpenSearchURL:      getEnv("OPENSEARCH_URL", "https://opensearch:9200"),
 		OpenSearchUser:     getEnv("OPENSEARCH_USER", "admin"),
@@ -40,6 +47,7 @@ func Load() Config {
 		EmbeddingAPIURL:    getEnv("EMBEDDING_API_URL", ""),
 		EmbeddingAPIKey:    getEnv("EMBEDDING_API_KEY", ""),
 		EmbeddingModel:     getEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
+		StaticDir:          getEnv("STATIC_DIR", "web/dist"),
 	}
 }
 

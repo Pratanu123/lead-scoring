@@ -28,6 +28,49 @@ func NewLeadHandler(service *service.LeadService, logger *slog.Logger, osClient 
 	return &LeadHandler{service: service, logger: logger, osClient: osClient, requests: requests}
 }
 
+func (h *LeadHandler) UpdateLeadStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var input domain.UpdateLeadStatusInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	lead, err := h.service.UpdateLeadStatus(r.Context(), r.PathValue("id"), input.Status)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrLeadNotFound):
+			writeError(w, http.StatusNotFound, "lead not found")
+		case errors.Is(err, service.ErrInvalidStatus):
+			writeError(w, http.StatusBadRequest, "status must be one of new, contacted, qualified, won, lost, disqualified, converted, customer")
+		default:
+			h.logger.Error("failed to update lead status", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to update lead status")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, lead)
+}
+
+func (h *LeadHandler) GetJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	job, err := h.service.GetJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
 func (h *LeadHandler) CreateLead(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("CreateLead request", "method", r.Method, "path", r.URL.Path)
 
@@ -286,19 +329,19 @@ func (h *LeadHandler) ScoreLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.service.ScoreLead(r.Context(), r.PathValue("id"))
+	result, err := h.service.EnqueueScoreLead(r.Context(), r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, service.ErrLeadNotFound) {
 			writeError(w, http.StatusNotFound, "lead not found")
 			return
 		}
 
-		h.logger.Error("failed to score lead", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to score lead")
+		h.logger.Error("failed to enqueue lead score", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to enqueue lead score")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, result)
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (h *LeadHandler) GetLatestLeadScore(w http.ResponseWriter, r *http.Request) {
