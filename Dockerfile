@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/worker ./cmd/worker
 FROM alpine:3.21
 
 WORKDIR /app
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates curl
 COPY --from=go-build /bin/api /app/api
 COPY --from=go-build /bin/worker /app/worker
 COPY --from=web-build /web/dist /app/web/dist
