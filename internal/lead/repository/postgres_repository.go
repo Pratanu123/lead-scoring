@@ -11,8 +11,9 @@ type Repository interface {
 	Create(ctx context.Context, input domain.CreateLeadInput) (domain.Lead, error)
 	List(ctx context.Context, input domain.ListLeadsInput) ([]domain.Lead, error)
 	GetByID(ctx context.Context, id string) (domain.Lead, error)
+	GetEmbedding(ctx context.Context, leadID string, model string) (domain.EmbeddingRecord, error)
 	UpsertEmbedding(ctx context.Context, leadID string, model string, contentHash string, vector string) (domain.EmbeddingResult, error)
-	FindSimilar(ctx context.Context, leadID string, vector string, limit int) ([]domain.SimilarLead, error)
+	FindSimilar(ctx context.Context, leadID string, model string, vector string, limit int) ([]domain.SimilarLead, error)
 	CreateScore(ctx context.Context, leadID string, probability float64, reasoning string, model string) (domain.LeadScore, error)
 	GetLatestScore(ctx context.Context, leadID string) (domain.LeadScore, error)
 	ListScores(ctx context.Context, leadID string, limit int) ([]domain.LeadScore, error)
@@ -191,6 +192,33 @@ WHERE id = $1;
 	return lead, nil
 }
 
+func (r *PostgresRepository) GetEmbedding(ctx context.Context, leadID string, model string) (domain.EmbeddingRecord, error) {
+	const query = `
+SELECT
+    lead_id,
+    embedding_model,
+    content_hash,
+    embedding::text,
+    created_at
+FROM lead_embeddings
+WHERE lead_id = $1 AND embedding_model = $2;
+`
+
+	var record domain.EmbeddingRecord
+	err := r.db.QueryRowContext(ctx, query, leadID, model).Scan(
+		&record.LeadID,
+		&record.Model,
+		&record.ContentHash,
+		&record.Vector,
+		&record.CreatedAt,
+	)
+	if err != nil {
+		return domain.EmbeddingRecord{}, err
+	}
+
+	return record, nil
+}
+
 func (r *PostgresRepository) UpsertEmbedding(ctx context.Context, leadID string, model string, contentHash string, vector string) (domain.EmbeddingResult, error) {
 	const query = `
 INSERT INTO lead_embeddings (
@@ -221,7 +249,7 @@ RETURNING lead_id, embedding_model, content_hash, created_at;
 	return result, nil
 }
 
-func (r *PostgresRepository) FindSimilar(ctx context.Context, leadID string, vector string, limit int) ([]domain.SimilarLead, error) {
+func (r *PostgresRepository) FindSimilar(ctx context.Context, leadID string, model string, vector string, limit int) ([]domain.SimilarLead, error) {
 	const query = `
 SELECT
     l.id,
@@ -229,15 +257,20 @@ SELECT
     l.email,
     l.source,
     COALESCE(l.industry, ''),
-    1 - (e.embedding <=> $2::vector) AS similarity
+    COALESCE(l.company_size, 0),
+    COALESCE(l.annual_revenue, 0)::float8,
+    COALESCE(l.notes, ''),
+    l.status,
+    1 - (e.embedding <=> $3::vector) AS similarity
 FROM lead_embeddings e
 JOIN leads l ON l.id = e.lead_id
 WHERE e.lead_id <> $1
-ORDER BY e.embedding <=> $2::vector
-LIMIT $3;
+  AND e.embedding_model = $2
+ORDER BY e.embedding <=> $3::vector
+LIMIT $4;
 `
 
-	rows, err := r.db.QueryContext(ctx, query, leadID, vector, limit)
+	rows, err := r.db.QueryContext(ctx, query, leadID, model, vector, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +285,10 @@ LIMIT $3;
 			&lead.Email,
 			&lead.Source,
 			&lead.Industry,
+			&lead.CompanySize,
+			&lead.AnnualRevenue,
+			&lead.Notes,
+			&lead.Status,
 			&lead.Similarity,
 		); err != nil {
 			return nil, err

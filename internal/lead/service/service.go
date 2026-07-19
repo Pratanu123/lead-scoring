@@ -8,13 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
-	"math"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
 
 	"lead-scoring/internal/lead/domain"
+	"lead-scoring/internal/lead/embedding"
 	"lead-scoring/internal/lead/repository"
 	"lead-scoring/internal/lead/scoring"
 
@@ -27,23 +27,39 @@ var ErrScoreNotFound = errors.New("lead score not found")
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-const (
-	cacheTTL            = 60 * time.Second
-	embeddingDimensions = 1536
-	localEmbeddingModel = "local-hash-embedding-v1"
-)
+const cacheTTL = 60 * time.Second
 
 type LeadService struct {
-	repo   repository.Repository
-	cache  *redis.Client
-	scorer scoring.Scorer
+	repo     repository.Repository
+	cache    *redis.Client
+	scorer   scoring.Scorer
+	embedder embedding.Embedder
+	logger   *slog.Logger
 }
 
-func NewLeadService(repo repository.Repository, cache *redis.Client, scorer scoring.Scorer) *LeadService {
+func NewLeadService(
+	repo repository.Repository,
+	cache *redis.Client,
+	scorer scoring.Scorer,
+	embedder embedding.Embedder,
+	logger *slog.Logger,
+) *LeadService {
 	if scorer == nil {
 		scorer = scoring.NewLocalScorer()
 	}
-	return &LeadService{repo: repo, cache: cache, scorer: scorer}
+	if embedder == nil {
+		embedder = embedding.NewLocalEmbedder()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &LeadService{
+		repo:     repo,
+		cache:    cache,
+		scorer:   scorer,
+		embedder: embedder,
+		logger:   logger,
+	}
 }
 
 func (s *LeadService) CreateLead(ctx context.Context, input domain.CreateLeadInput) (domain.Lead, error) {
@@ -72,7 +88,9 @@ func (s *LeadService) CreateLead(ctx context.Context, input domain.CreateLeadInp
 		return domain.Lead{}, err
 	}
 
-	_, _ = s.UpsertLeadEmbedding(ctx, lead.ID)
+	if _, err := s.UpsertLeadEmbedding(ctx, lead.ID); err != nil {
+		s.logger.Warn("lead embedding failed after create", "lead_id", lead.ID, "error", err)
+	}
 	s.cacheLead(ctx, lead)
 	s.invalidateLeadListCache(ctx)
 
@@ -134,11 +152,8 @@ func (s *LeadService) UpsertLeadEmbedding(ctx context.Context, id string) (domai
 		return domain.EmbeddingResult{}, err
 	}
 
-	content := leadEmbeddingContent(lead)
-	contentHash := hashText(content)
-	vector := deterministicVector(content)
-
-	return s.repo.UpsertEmbedding(ctx, lead.ID, localEmbeddingModel, contentHash, vector)
+	_, result, err := s.ensureLeadEmbedding(ctx, lead)
+	return result, err
 }
 
 func (s *LeadService) SimilarLeads(ctx context.Context, id string, limit int) ([]domain.SimilarLead, error) {
@@ -154,13 +169,12 @@ func (s *LeadService) SimilarLeads(ctx context.Context, id string, limit int) ([
 		return nil, err
 	}
 
-	content := leadEmbeddingContent(lead)
-	vector := deterministicVector(content)
-	if _, err := s.repo.UpsertEmbedding(ctx, lead.ID, localEmbeddingModel, hashText(content), vector); err != nil {
+	vector, _, err := s.ensureLeadEmbedding(ctx, lead)
+	if err != nil {
 		return nil, err
 	}
 
-	return s.repo.FindSimilar(ctx, lead.ID, vector, limit)
+	return s.repo.FindSimilar(ctx, lead.ID, s.embedder.Model(), vector, limit)
 }
 
 func (s *LeadService) ScoreLead(ctx context.Context, id string) (domain.ScoreLeadResult, error) {
@@ -221,6 +235,37 @@ func (s *LeadService) ListLeadScores(ctx context.Context, id string, limit int) 
 	}
 
 	return s.repo.ListScores(ctx, lead.ID, limit)
+}
+
+func (s *LeadService) ensureLeadEmbedding(ctx context.Context, lead domain.Lead) (string, domain.EmbeddingResult, error) {
+	content := leadEmbeddingContent(lead)
+	contentHash := hashText(content)
+	model := s.embedder.Model()
+
+	existing, err := s.repo.GetEmbedding(ctx, lead.ID, model)
+	if err == nil && existing.ContentHash == contentHash {
+		return existing.Vector, domain.EmbeddingResult{
+			LeadID:      existing.LeadID,
+			Model:       existing.Model,
+			ContentHash: existing.ContentHash,
+			CreatedAt:   existing.CreatedAt,
+		}, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", domain.EmbeddingResult{}, err
+	}
+
+	embedded, err := s.embedder.Embed(ctx, content)
+	if err != nil {
+		return "", domain.EmbeddingResult{}, err
+	}
+
+	result, err := s.repo.UpsertEmbedding(ctx, lead.ID, model, contentHash, embedded.Vector)
+	if err != nil {
+		return "", domain.EmbeddingResult{}, err
+	}
+
+	return embedded.Vector, result, nil
 }
 
 func leadCacheKey(id string) string {
@@ -318,40 +363,4 @@ func leadEmbeddingContent(lead domain.Lead) string {
 func hashText(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
-}
-
-func deterministicVector(content string) string {
-	vector := make([]float64, embeddingDimensions)
-	tokens := strings.Fields(content)
-	if len(tokens) == 0 {
-		tokens = []string{"empty"}
-	}
-
-	for _, token := range tokens {
-		hash := fnv.New64a()
-		_, _ = hash.Write([]byte(token))
-		sum := hash.Sum64()
-		index := int(sum % embeddingDimensions)
-		weight := 1.0
-		if sum%2 == 0 {
-			weight = -1.0
-		}
-		vector[index] += weight
-	}
-
-	var magnitude float64
-	for _, value := range vector {
-		magnitude += value * value
-	}
-	magnitude = math.Sqrt(magnitude)
-	if magnitude == 0 {
-		magnitude = 1
-	}
-
-	values := make([]string, len(vector))
-	for i, value := range vector {
-		values[i] = fmt.Sprintf("%.6f", value/magnitude)
-	}
-
-	return "[" + strings.Join(values, ",") + "]"
 }
