@@ -100,7 +100,9 @@ func TestRemoteScorerRedactsPIIAndParsesStructuredResponse(t *testing.T) {
 }
 
 func TestFallbackScorerUsesLocalWhenRemoteFails(t *testing.T) {
-	scorer := NewFallbackScorer(&failingScorer{err: errors.New("remote down")}, NewLocalScorer())
+	hookCalls := 0
+	scorer := NewFallbackScorer(&failingScorer{err: errors.New("remote down")}, NewLocalScorer()).
+		WithFallbackHook(func() { hookCalls++ })
 	decision, err := scorer.Score(context.Background(), domain.Lead{
 		CompanyName: "Acme",
 		Source:      "referral",
@@ -115,6 +117,24 @@ func TestFallbackScorerUsesLocalWhenRemoteFails(t *testing.T) {
 	}
 	if !strings.Contains(decision.Reasoning, "Fallback used after remote scorer failure") {
 		t.Fatalf("expected fallback note in reasoning, got %q", decision.Reasoning)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("expected fallback hook once, got %d", hookCalls)
+	}
+}
+
+func TestFallbackScorerDoesNotHookOnPrimarySuccess(t *testing.T) {
+	hookCalls := 0
+	scorer := NewFallbackScorer(NewLocalScorer(), &failingScorer{err: errors.New("unused")}).
+		WithFallbackHook(func() { hookCalls++ })
+	if _, err := scorer.Score(context.Background(), domain.Lead{
+		CompanyName: "Acme",
+		Source:      "referral",
+	}, nil); err != nil {
+		t.Fatalf("Score returned error: %v", err)
+	}
+	if hookCalls != 0 {
+		t.Fatalf("expected no fallback hook on success, got %d", hookCalls)
 	}
 }
 
