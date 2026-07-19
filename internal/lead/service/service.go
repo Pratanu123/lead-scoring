@@ -46,12 +46,18 @@ const (
 	scoreCacheTTL = 5 * time.Minute
 )
 
+// JobQueue enqueues and loads async embed/score jobs.
+type JobQueue interface {
+	Enqueue(ctx context.Context, jobType string, leadID string, payload any) (jobs.Job, error)
+	Get(ctx context.Context, id string) (jobs.Job, error)
+}
+
 type LeadService struct {
 	repo     repository.Repository
 	cache    *redis.Client
 	scorer   scoring.Scorer
 	embedder embedding.Embedder
-	jobs     *jobs.Store
+	jobs     JobQueue
 	metrics  *appmetrics.Registry
 	logger   *slog.Logger
 }
@@ -61,7 +67,7 @@ func NewLeadService(
 	cache *redis.Client,
 	scorer scoring.Scorer,
 	embedder embedding.Embedder,
-	jobStore *jobs.Store,
+	jobStore JobQueue,
 	metrics *appmetrics.Registry,
 	logger *slog.Logger,
 ) *LeadService {

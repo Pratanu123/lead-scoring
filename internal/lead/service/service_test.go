@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,12 +14,17 @@ import (
 	"lead-scoring/internal/lead/embedding"
 	"lead-scoring/internal/lead/scoring"
 	appmetrics "lead-scoring/internal/platform/appmetrics"
+	"lead-scoring/internal/platform/jobs"
 )
 
 const testLeadID = "11111111-1111-1111-1111-111111111111"
 
 func newTestService(repo *fakeRepository, scorer scoring.Scorer) *LeadService {
 	return NewLeadService(repo, nil, scorer, embedding.NewLocalEmbedder(), nil, appmetrics.NewRegistry(), discardLogger())
+}
+
+func newTestServiceWithJobs(repo *fakeRepository, queue *fakeJobQueue, scorer scoring.Scorer) *LeadService {
+	return NewLeadService(repo, nil, scorer, embedding.NewLocalEmbedder(), queue, appmetrics.NewRegistry(), discardLogger())
 }
 
 func TestScoreLeadPersistsRAGResult(t *testing.T) {
@@ -146,6 +152,112 @@ func TestUpdateLeadStatus(t *testing.T) {
 	}
 }
 
+func TestUpdateLeadStatusRejectsInvalidStatus(t *testing.T) {
+	repo := &fakeRepository{lead: domain.Lead{ID: testLeadID, Status: "new"}}
+	svc := newTestService(repo, scoring.NewLocalScorer())
+	_, err := svc.UpdateLeadStatus(context.Background(), testLeadID, "not-a-status")
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("expected ErrInvalidStatus, got %v", err)
+	}
+}
+
+func TestCreateLeadEnqueuesEmbedJob(t *testing.T) {
+	repo := &fakeRepository{
+		lead: domain.Lead{
+			ID:          testLeadID,
+			CompanyName: "Acme",
+			Email:       "buyer@acme.example",
+			Source:      "website",
+			Status:      "new",
+		},
+	}
+	queue := &fakeJobQueue{}
+	svc := newTestServiceWithJobs(repo, queue, scoring.NewLocalScorer())
+
+	lead, err := svc.CreateLead(context.Background(), domain.CreateLeadInput{
+		CompanyName: "Acme",
+		Email:       "buyer@acme.example",
+		Source:      "website",
+	})
+	if err != nil {
+		t.Fatalf("CreateLead returned error: %v", err)
+	}
+	if lead.ID != testLeadID {
+		t.Fatalf("unexpected lead id %q", lead.ID)
+	}
+	if len(queue.enqueued) != 1 {
+		t.Fatalf("expected one enqueue, got %d", len(queue.enqueued))
+	}
+	if queue.enqueued[0].Type != jobs.TypeEmbed {
+		t.Fatalf("expected embed job, got %q", queue.enqueued[0].Type)
+	}
+	if queue.enqueued[0].LeadID != testLeadID {
+		t.Fatalf("expected lead id on job, got %q", queue.enqueued[0].LeadID)
+	}
+	if repo.upsertEmbeddingCalls != 0 {
+		t.Fatalf("expected async create path to skip sync embed, got %d upserts", repo.upsertEmbeddingCalls)
+	}
+}
+
+func TestEnqueueScoreLeadReturnsJob(t *testing.T) {
+	repo := &fakeRepository{lead: domain.Lead{ID: testLeadID}}
+	queue := &fakeJobQueue{}
+	svc := newTestServiceWithJobs(repo, queue, scoring.NewLocalScorer())
+
+	result, err := svc.EnqueueScoreLead(context.Background(), testLeadID)
+	if err != nil {
+		t.Fatalf("EnqueueScoreLead returned error: %v", err)
+	}
+	if result.Type != jobs.TypeScore || result.Status != jobs.StatusQueued {
+		t.Fatalf("unexpected enqueue result: %+v", result)
+	}
+	if result.JobID == "" {
+		t.Fatal("expected job id")
+	}
+	if len(queue.enqueued) != 1 || queue.enqueued[0].Type != jobs.TypeScore {
+		t.Fatalf("expected one score job, got %+v", queue.enqueued)
+	}
+}
+
+func TestEnqueueScoreLeadRequiresQueue(t *testing.T) {
+	repo := &fakeRepository{lead: domain.Lead{ID: testLeadID}}
+	svc := newTestService(repo, scoring.NewLocalScorer())
+	_, err := svc.EnqueueScoreLead(context.Background(), testLeadID)
+	if err == nil || !strings.Contains(err.Error(), "job queue unavailable") {
+		t.Fatalf("expected queue unavailable error, got %v", err)
+	}
+}
+
+func TestGetJob(t *testing.T) {
+	repo := &fakeRepository{lead: domain.Lead{ID: testLeadID}}
+	queue := &fakeJobQueue{
+		jobsByID: map[string]jobs.Job{
+			"job-1": {ID: "job-1", Type: jobs.TypeScore, LeadID: testLeadID, Status: jobs.StatusCompleted},
+		},
+	}
+	svc := newTestServiceWithJobs(repo, queue, scoring.NewLocalScorer())
+	job, err := svc.GetJob(context.Background(), "job-1")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if job.Status != jobs.StatusCompleted {
+		t.Fatalf("expected completed, got %q", job.Status)
+	}
+}
+
+func TestCreateLeadValidation(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := newTestService(repo, scoring.NewLocalScorer())
+	_, err := svc.CreateLead(context.Background(), domain.CreateLeadInput{
+		CompanyName: "",
+		Email:       "bad",
+		Source:      "",
+	})
+	if !errors.Is(err, ErrInvalidLead) {
+		t.Fatalf("expected ErrInvalidLead, got %v", err)
+	}
+}
+
 func TestLatestLeadScoreMapsMissingScore(t *testing.T) {
 	repo := &fakeRepository{
 		lead:           domain.Lead{ID: testLeadID},
@@ -174,8 +286,56 @@ func TestListLeadScoresBoundsLimit(t *testing.T) {
 	}
 }
 
+func TestSimilarLeadsBoundsLimit(t *testing.T) {
+	repo := &fakeRepository{
+		lead: domain.Lead{
+			ID:          testLeadID,
+			CompanyName: "Acme",
+			Email:       "a@b.com",
+			Source:      "web",
+		},
+		similarLeads: []domain.SimilarLead{{ID: "22222222-2222-2222-2222-222222222222", CompanyName: "Peer"}},
+	}
+	svc := newTestService(repo, scoring.NewLocalScorer())
+	items, err := svc.SimilarLeads(context.Background(), testLeadID, 1000)
+	if err != nil {
+		t.Fatalf("SimilarLeads returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one similar lead, got %d", len(items))
+	}
+}
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type fakeJobQueue struct {
+	enqueued []jobs.Job
+	jobsByID map[string]jobs.Job
+}
+
+func (f *fakeJobQueue) Enqueue(_ context.Context, jobType string, leadID string, _ any) (jobs.Job, error) {
+	job := jobs.Job{
+		ID:     "job-" + jobType + "-" + leadID[:8],
+		Type:   jobType,
+		LeadID: leadID,
+		Status: jobs.StatusQueued,
+	}
+	f.enqueued = append(f.enqueued, job)
+	if f.jobsByID == nil {
+		f.jobsByID = map[string]jobs.Job{}
+	}
+	f.jobsByID[job.ID] = job
+	return job, nil
+}
+
+func (f *fakeJobQueue) Get(_ context.Context, id string) (jobs.Job, error) {
+	job, ok := f.jobsByID[id]
+	if !ok {
+		return jobs.Job{}, jobs.ErrNotFound
+	}
+	return job, nil
 }
 
 type fakeRepository struct {
@@ -191,7 +351,16 @@ type fakeRepository struct {
 	findSimilarModel     string
 }
 
-func (f *fakeRepository) Create(context.Context, domain.CreateLeadInput) (domain.Lead, error) {
+func (f *fakeRepository) Create(_ context.Context, input domain.CreateLeadInput) (domain.Lead, error) {
+	if f.lead.ID == "" {
+		f.lead = domain.Lead{
+			ID:          testLeadID,
+			CompanyName: input.CompanyName,
+			Email:       input.Email,
+			Source:      input.Source,
+			Status:      "new",
+		}
+	}
 	return f.lead, nil
 }
 
